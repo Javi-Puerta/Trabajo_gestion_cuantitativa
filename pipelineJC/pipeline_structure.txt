@@ -1,0 +1,15 @@
+msci_pipeline/
+├── data/
+│   ├── constituents/     # CSV files with index constituents
+│   ├── prices/           # Parquet files with OHLCV data
+│   └── fundamentals/     # Company financials
+├── src/
+│   ├── __init__.py
+│   ├── 01_fetch_constituents.py
+│   ├── 02_download_prices.py
+│   ├── 03_load_fundamentals.py
+│   ├── 04_data_quality.py
+│   └── 05_analytics.py
+├── config/
+│   └── config.yaml
+└── msci_database.db
