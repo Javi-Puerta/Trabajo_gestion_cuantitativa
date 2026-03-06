@@ -182,8 +182,15 @@ class StockPickingModel:
             datos_hoy['Score'] = self.model.predict_proba(X_hoy)[:, 1]
             datos_hoy = datos_hoy.sort_values('Score', ascending=False)
             
-            # Filtrar cartera por tickers que siguen siendo válidos
-            cartera_actual = cartera_actual.intersection(tickers_validos)
+            # Detectar tickers delisted (estaban en cartera pero ya no tienen datos)
+            tickers_con_datos_hoy = set(datos_hoy['Ticker'])
+            tickers_delisted = cartera_actual - tickers_con_datos_hoy
+            
+            if tickers_delisted:
+                print(f"{fecha_hoy.date()}: Delisted: {tickers_delisted}")
+            
+            # Filtrar cartera por tickers que siguen teniendo datos
+            cartera_actual = cartera_actual.intersection(tickers_con_datos_hoy)
             
             # Selección con buffer
             if len(cartera_actual) == 0:
