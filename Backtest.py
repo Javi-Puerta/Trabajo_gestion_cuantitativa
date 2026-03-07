@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -9,94 +11,174 @@ from VariablesTransformation import FeatureEngineer
 from Modelos import ModeloBase
 from Estrategia import EstrategiaBase
 
-
 class BacktestEngine:
-    class BacktestEngine:
-        def __init__(
-            self,
-            universo: UniversoActivosBase,
-            proveedor: ProveedorDatosBase,
-            feature_engineer: FeatureEngineer,
-            estrategia: EstrategiaBase,        # ← sustituye a modelo + params de selección
-            start_date: str,
-            end_date: str,
-            len_ventana: int,
-        ):
-            self.universo    = universo
-            self.estrategia  = estrategia
-            self.fe          = feature_engineer
-            self.start_date  = pd.Timestamp(start_date)
-            self.end_date    = pd.Timestamp(end_date)
-            self.len_ventana = len_ventana
+    @staticmethod
+    def _calcular_costes(tickers: list) -> dict:
+        """
+        Calcula los costes de transacción de comprar/vender cada activo. Estos costes son estáticos
+        para cada activo.
+        """
+        costes = {}
+        for ticker in tickers:
+            costes[ticker] = 0.001 # 0.1% de coste por operación, por ejemplo
+        return costes
 
-            self.df = self.fe.build(proveedor.df_weekly, proveedor.df_daily)
-            self.composiciones: dict[pd.Timestamp, set] = {}
+    def __init__(self, universo: UniversoActivosBase, proveedor: ProveedorDatosBase,
+                    feature_engineer: FeatureEngineer, estrategia: EstrategiaBase,
+                    start_date: str, end_date: str, len_ventana: int,
+                    nominal: float):
+        self.universo    = universo
+        self.proveedor   = proveedor
+        self.estrategia  = estrategia
+        self.fe          = feature_engineer
+        self.start_date  = pd.Timestamp(start_date)
+        self.end_date    = pd.Timestamp(end_date)
+        self.len_ventana = len_ventana
+        self.posicion    = {} # diccionario ticker -> cantidad de acciones, actualizado cada fecha
+        self.VP          = nominal # Valor presente de la cartera
 
-        def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
-            fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
-            train = self.df[
-                (self.df["Fecha"] >= fecha_inicio) &
-                (self.df["Fecha"] <  fecha_pivote)
-            ]
-            return self.estrategia.train(train, self.fe.feature_cols, tickers_validos)
+        all_tickers = self.universo.get_full_ticker_list()
+        self.costes = self._calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
+        df_daily    = proveedor.download_prices_daily(all_tickers, start_date, end_date)
+        df_weekly   = proveedor.download_prices_weekly(all_tickers, start_date, end_date)
+        self.df     = self.fe.build(df_weekly, df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
 
-        def run(self, coste_operacion: float = 0.001) -> tuple[pd.DataFrame, float]:
-            fecha_inicio_bt = self.start_date + pd.DateOffset(years=self.len_ventana)
-            fechas = sorted(f for f in self.df["Fecha"].unique() if f >= fecha_inicio_bt)
+        self.composiciones = {} #diccinario fecha -> tickers
+    
+    def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
+        fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
+        train = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
+        
+        return self.estrategia.train(train, self.fe.feature_cols, tickers_validos)
+    
+    def _mark_to_market(self, posi_anterior: dict, datos_hoy: pd.DataFrame) -> float:
+        '''
+        Calcula el valor de la cartera hoy, dada la cantidad en cash, la cantidad de acciones poseídas
+        de cada ticker y los precios actuales.
+        '''
+        valor_cartera = posi_anterior["cash"]
+        precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
 
-            for f in fechas:
-                self.composiciones[f] = self.universo.get_universe_at_date(f)
+        for ticker, peso in posi_anterior.items():
+            if ticker == "cash":
+                continue
+            
+            valor_cartera += posi_anterior[ticker] * precios_hoy.get(ticker, np.nan)
 
-            historial_neto: list = []
-            fechas_plot: list    = []
-            ultima_fecha_train   = None
-            modelo_entrenado     = False
-            pesos_anteriores: dict = {}
+        return valor_cartera
+    
+    def _ajustar_cartera(self, cartera: dict, datos_hoy: pd.DataFrame, pesos: dict,
+                         pesos_nuevos: dict) -> tuple[dict, dict, float]:
+        '''
+        Calcula la cartera ajustada, nuevos pesos y valor total de la cartera tras realizar un ajuste
+        según unos pesos nuevos que se quieren obtener.
+        '''
+        precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
+        for ticker in set(cartera.keys()) | set(pesos_nuevos.keys()):
+            if ticker == "cash":
+                continue
+            elif ticker not in pesos_nuevos: # vendemos todo
+                precio_venta = precios_hoy.get(ticker, np.nan) * (1 - self.costes[ticker])
+                cartera["cash"] += cartera[ticker] * precio_venta
+                cartera.pop(ticker, None)
+                pesos.pop(ticker, None)
+            elif ticker not in pesos: # compramos nuevo activo
+                precio_compra = precios_hoy.get(ticker, np.nan) * (1 + self.costes[ticker])
+                cartera[ticker] = math.floor((pesos_nuevos[ticker] * self.VP) / precio_compra)
+                cartera["cash"] -= cartera[ticker] * precio_compra
+            else: # ajustamos posición existente
+                ajuste = pesos_nuevos[ticker] - pesos[ticker]
+                if ajuste > 0: # aumento de posición
+                    precio_compra = precios_hoy.get(ticker, np.nan) * (1 + self.costes[ticker])
+                    cant_compra = math.floor((ajuste * self.VP) / precio_compra)
+                    cartera[ticker] += cant_compra
+                    cartera["cash"] -= cant_compra * precio_compra
+                elif ajuste < 0: # reducción de posición
+                    precio_venta = precios_hoy.get(ticker, np.nan) * (1 - self.costes[ticker])
+                    cant_venta = math.ceil((-ajuste * self.VP) / precio_venta)
+                    cartera[ticker] -= cant_venta
+                    cartera["cash"] += cant_venta * precio_venta
 
-            for fecha_hoy in fechas[:-1]:
-                tickers_validos = self.composiciones[fecha_hoy]
+        # Calculamos el valor total de la cartera
+        valor_total = cartera["cash"]
+        for ticker, cantidad in cartera.items():
+            if ticker == "cash":
+                continue
+            valor_total += cantidad * precios_hoy.get(ticker, np.nan)
 
-                # Re-entrenamiento cada 6 meses
-                if ultima_fecha_train is None or (fecha_hoy - ultima_fecha_train).days >= 180:
-                    ok = self._train(fecha_hoy, tickers_validos)
-                    if ok:
-                        ultima_fecha_train = fecha_hoy
-                        modelo_entrenado   = True
+        # Calculamos los pesos de cada activo
+        pesos_adj = {}
+        for ticker, cantidad in cartera.items():
+            if ticker == "cash":
+                pesos_adj["cash"] = cantidad / valor_total
+                continue
+            pesos_adj[ticker] = cantidad * precios_hoy.get(ticker, np.nan) / valor_total
 
-                if not modelo_entrenado:
-                    continue
+        return cartera, pesos_adj, valor_total
+    
+    def _run(self) -> tuple[pd.DataFrame, float]:
+        fecha_inicio_bt = self.start_date + pd.DateOffset(years=self.len_ventana)
+        fechas = sorted(f for f in self.df["Fecha"].unique() if f >= fecha_inicio_bt)
 
-                datos_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
-                if datos_hoy.empty:
-                    continue
+        historial_neto = {}
+        ultima_fecha_train = None
+        cartera = {"cash": self.VP} # Empezamos 100% en cash
+        pesos = {"cash": 1.0}
 
-                # La estrategia decide los pesos
-                pesos_nuevos = self.estrategia.seleccionar(datos_hoy, self.fe.feature_cols, tickers_validos)
-                if not pesos_nuevos:
-                    continue
+        for fecha_hoy in fechas[:-1]:
+            tickers_hoy =self.universo.get_universe_at_date(fecha_hoy)
 
-                # Costes de transacción
-                tickers_anteriores = set(pesos_anteriores.keys())
-                tickers_nuevos     = set(pesos_nuevos.keys())
-                n_ops  = len(tickers_anteriores - tickers_nuevos) + len(tickers_nuevos - tickers_anteriores)
-                coste  = (n_ops / len(tickers_nuevos)) * coste_operacion if tickers_nuevos else 0
+            # Re-entrenamiento cada 6 meses
+            if ultima_fecha_train is None or (fecha_hoy - ultima_fecha_train).days >= 180:
+                self._train(fecha_hoy, tickers_hoy)
+                ultima_fecha_train = fecha_hoy
 
-                # Retorno ponderado
-                retornos = datos_hoy.set_index("Ticker")["Retorno_1W"]
-                retorno  = sum(pesos_nuevos[t] * retornos[t] for t in tickers_nuevos if t in retornos)
+            datos_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
 
-                if pd.notna(retorno):
-                    historial_neto.append(retorno - coste)
-                    fechas_plot.append(fecha_hoy)
+            #Calculamos el valor actual de la cartera
+            self.VP = self._mark_to_market(cartera, datos_hoy)
 
-                pesos_anteriores = pesos_nuevos
+            # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
+            pesos_nuevos = self.estrategia.seleccionar(datos_hoy, self.fe.feature_cols, cartera)
+            cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos, pesos_nuevos)
+            
+            historial_neto[fecha_hoy] = self.VP
 
-            if not historial_neto:
-                return pd.DataFrame(columns=["Fecha", "Retorno_Neto", "Curva"]), float("nan")
+        return pd.DataFrame(list(historial_neto.items()), columns=["Fecha", "Valor cartera"])
+    
+    def print_results(self, bmks: list, bmk_equal_weight: list | None) -> None:
+        df_estrategia = self._run()
+        # Normalizamos para comparar con benchmarks
+        serie_estrategia = df_estrategia["Valor cartera"] / df_estrategia["Valor cartera"].iloc[0]
+        fechas = df_estrategia["Fecha"]
 
-            resultados = pd.DataFrame({"Fecha": fechas_plot, "Retorno_Neto": historial_neto})
-            resultados["Curva"] = (1 + resultados["Retorno_Neto"]).cumprod()
-            rendimiento_total   = (resultados["Curva"].iloc[-1] - 1) * 100
+        plt.figure(figsize=(12, 6))
+        plt.plot(fechas, serie_estrategia, label="Estrategia", linewidth=2)
 
-            self._print_results(resultados)
-            return resultados, rendimiento_total
+        for bmk in bmks:
+            df_bmk = self.proveedor.download_prices_daily(bmk, self.start_date.strftime("%Y-%m-%d"),
+                                                       self.end_date.strftime("%Y-%m-%d"))
+            df_bmk["Fecha"] = pd.to_datetime(df_bmk["Fecha"])
+            serie_bmk = df_bmk.set_index("Fecha")["Precio_Close"].reindex(fechas).ffill()
+
+            plt.plot(fechas, serie_bmk / serie_bmk.iloc[0], label=bmk, linestyle="--")
+
+        if bmk_equal_weight: # Benchmark equiponderado
+            df_ew = self.proveedor.download_prices_daily(bmk_equal_weight,
+                                                         self.start_date.strftime("%Y-%m-%d"),
+                                                         self.end_date.strftime("%Y-%m-%d"))
+            precios = (
+                df_ew.assign(Fecha=pd.to_datetime(df_ew["Fecha"]))
+                .pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+                .sort_index()
+            )
+            serie_ew = (1 + precios.pct_change().mean(axis=1, skipna=True).fillna(0)).cumprod()
+            serie_ew = serie_ew.reindex(fechas).ffill()
+            plt.plot(fechas, serie_ew / serie_ew.iloc[0], label="Benchmark EW", linestyle=":")
+
+        plt.title("Evolución de la cartera vs Benchmarks")
+        plt.xlabel("Fecha")
+        plt.legend()
+        plt.show()
+
+        return None

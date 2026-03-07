@@ -25,15 +25,8 @@ class ProveedorDatosBase(ABC):
         pass
 
 class YFinanceProvider(ProveedorDatosBase):
-    def __init__(self, tickers: list[str], start_date: str, end_date: str):
-        self.tickers = tickers
-        self.start_date = start_date
-        self.end_date = end_date
-        self.df_daily  = self.download_prices_daily()
-        self.df_weekly = self.download_prices_weekly()
-
-    def download_prices_daily(self) -> pd.DataFrame:
-        data = yf.download(self.tickers, start=self.start_date, end=self.end_date,
+    def download_prices_daily(self, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+        data = yf.download(tickers, start=start_date, end=end_date,
                            interval="1d", auto_adjust=True)
 
         precios = data["Close"].stack().reset_index()
@@ -47,10 +40,11 @@ class YFinanceProvider(ProveedorDatosBase):
 
         return df.drop(columns="Volumen").sort_values(["Ticker", "Fecha"]).reset_index(drop=True)
 
-    def download_prices_weekly(self) -> pd.DataFrame:
-        df = self.df_daily.copy().set_index("Fecha")
+    def download_prices_weekly(self, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+        df_daily = self.download_prices_daily(tickers, start_date, end_date)
+        df_daily["Fecha"] = pd.to_datetime(df_daily["Fecha"])
 
-        weekly = df.groupby("Ticker").resample("W-WED")
-        weekly = weekly.agg(Precio_Close=("Precio_Close", "last"),Volumen_USD =("Volumen_USD",  "sum"),).reset_index()
+        weekly = df_daily.set_index("Fecha").groupby("Ticker").resample("W-WED")
+        weekly = weekly.agg(Precio_Close=("Precio_Close", "last"), Volumen_USD=("Volumen_USD", "sum")).reset_index()
 
         return weekly.sort_values(["Ticker", "Fecha"]).reset_index(drop=True)

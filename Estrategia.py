@@ -54,35 +54,29 @@ class EstrategiaMLEquiponderada(EstrategiaBase):
         return True
 
     def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
-                    tickers_validos: set) -> dict[str, float]:
-        # Filtrar por tickers válidos en esta fecha
-        datos = df_hoy[df_hoy["Ticker"].isin(tickers_validos)].copy()
+                    cartera: dict[str, float]) -> dict[str, float]:
+        datos = df_hoy.copy()
         if datos.empty:
             return {}
 
-        # Scoring
-        datos["Score"] = self.modelo.predict_proba(datos[feature_cols])
+        proba = self.modelo.predict_proba(datos[feature_cols])
+        datos["Score"] = proba[:, 1] if getattr(proba, "ndim", 1) > 1 else proba
         datos = datos.sort_values("Score", ascending=False)
 
-        # Gestión de delists
-        tickers_hoy = set(datos["Ticker"])
-        tickers_delist = self._cartera_actual - tickers_hoy
-        if tickers_delist:
-            print(f"Delisted: {tickers_delist}")
-        self._cartera_actual = self._cartera_actual & tickers_hoy
+        # Posiciones actuales (ignorando cash)
+        cartera_actual = set(cartera.keys()) - {"cash"}
 
-        # Selección con buffer de permanencia
-        if not self._cartera_actual:
+        tickers_hoy = set(datos["Ticker"])
+        mantener_base = cartera_actual & tickers_hoy  # elimina delisted automáticamente
+
+        if not mantener_base:
             nueva_cartera = set(datos.head(self.n_activos_obj)["Ticker"])
         else:
-            top_mant      = set(datos.head(self.umbral_salida)["Ticker"])
-            mantener      = self._cartera_actual & top_mant
-            huecos        = self.n_activos_obj - len(mantener)
-            candidatos    = [t for t in datos["Ticker"] if t not in mantener]
+            top_mant = set(datos.head(self.umbral_salida)["Ticker"])
+            mantener = mantener_base & top_mant
+            huecos = self.n_activos_obj - len(mantener)
+            candidatos = [t for t in datos["Ticker"] if t not in mantener]
             nueva_cartera = mantener | set(candidatos[:huecos])
 
-        self._cartera_actual = nueva_cartera
-
-        # Pesos equiponderados
         peso = 1 / len(nueva_cartera)
-        return {ticker: peso for ticker in nueva_cartera}
+        return {t: peso for t in nueva_cartera}

@@ -48,12 +48,12 @@ class FeatureEngineer:
         df["Momentum_1M"]  = df.groupby("Ticker")["Precio_Close"].pct_change(4)
 
         # Momentum relativo vs índice
-        retorno_indice = df[df["Ticker"] == self.ticker_indice].set_index("Fecha")["Retorno_1W"]
-        df["Retorno_Indice"] = df["Fecha"].map(retorno_indice)
-        df["Momentum_Relativo_12M"] = (
-            df.groupby("Ticker")["Precio_Close"].pct_change(52) -
-            df.groupby("Fecha")["Retorno_Indice"].transform("first").rolling(52).sum()  
-        )
+        # retorno_indice = df[df["Ticker"] == self.ticker_indice].set_index("Fecha")["Retorno_1W"]
+        # df["Retorno_Indice"] = df["Fecha"].map(retorno_indice)
+        # df["Momentum_Relativo_12M"] = (
+        #     df.groupby("Ticker")["Precio_Close"].pct_change(52) -
+        #     df.groupby("Fecha")["Retorno_Indice"].transform("first").rolling(52).sum()  
+        # )
 
         # Volatilidad rolling
         df["Volatilidad_12M"] = df.groupby("Ticker")["Retorno_1W"].transform(lambda x: x.rolling(52).std())
@@ -61,10 +61,10 @@ class FeatureEngineer:
         df["Volatilidad_1M"]  = df.groupby("Ticker")["Retorno_1W"].transform(lambda x: x.rolling(4).std())
 
         # Beta 12M vs índice
-        retornos_indice_serie = df[df["Ticker"] == self.ticker_indice].set_index("Fecha")["Retorno_1W"]
-        df["Beta_12M"] = df.groupby("Ticker", group_keys=False).apply(
-            lambda g: calculate_beta(g.set_index("Fecha")["Retorno_1W"], retornos_indice_serie, 52)
-        ).values
+        # retornos_indice_serie = df[df["Ticker"] == self.ticker_indice].set_index("Fecha")["Retorno_1W"]
+        # df["Beta_12M"] = df.groupby("Ticker", group_keys=False).apply(
+        #     lambda g: calculate_beta(g.set_index("Fecha")["Retorno_1W"], retornos_indice_serie, 52)
+        # ).values
 
         # Lagged returns
         df["Retorno_t1"] = df.groupby("Ticker")["Retorno_1W"].shift(1)
@@ -86,8 +86,9 @@ class FeatureEngineer:
         # 4. Feature cols
         # ----------------------------------------------------------------
         self.feature_cols = [
-            "Momentum_12M", "Momentum_6M", "Momentum_1M", "Momentum_Relativo_12M",
-            "Volatilidad_12M", "Volatilidad_6M", "Volatilidad_1M", "Beta_12M",
+            "Momentum_12M", "Momentum_6M", "Momentum_1M",
+            # "Momentum_Relativo_12M", "Beta_12M",
+            "Volatilidad_12M", "Volatilidad_6M", "Volatilidad_1M",
             "Retorno_t1", "Retorno_t2", "Volumen_USD",
             "RSI_14", "RSI_9", "RSI_3",
             "Log_Precio_Bollinger_Upper", "Log_Precio_Bollinger_Lower",
@@ -96,7 +97,7 @@ class FeatureEngineer:
             "MACD"
         ]
 
-        return df.drop(columns=["Retorno_Next_Week", "Precio_Close", "Retorno_Indice"],
+        return df.drop(columns=["Retorno_Next_Week", "Retorno_Indice"],
                        errors="ignore").dropna()
 
     def _build_daily_features(self, df_daily: pd.DataFrame) -> pd.DataFrame:
