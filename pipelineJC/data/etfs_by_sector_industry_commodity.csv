@@ -1,43 +1,42 @@
-Category,Group,Ticker,Name
-Sector,Communication Services,XLC,Communication Services Select Sector SPDR ETF
-Sector,Consumer Discretionary,XLY,Consumer Discretionary Select Sector SPDR ETF
-Sector,Consumer Staples,XLP,Consumer Staples Select Sector SPDR ETF
-Sector,Energy,XLE,Energy Select Sector SPDR ETF
-Sector,Financials,XLF,Financial Select Sector SPDR ETF
-Sector,Health Care,XLV,Health Care Select Sector SPDR ETF
-Sector,Industrials,XLI,Industrial Select Sector SPDR ETF
-Sector,Materials,XLB,Materials Select Sector SPDR ETF
-Sector,Real Estate,XLRE,Real Estate Select Sector SPDR ETF
-Sector,Technology,XLK,Technology Select Sector SPDR ETF
-Sector,Utilities,XLU,Utilities Select Sector SPDR ETF
-Industry,Industrials,FIDU,Fidelity MSCI Industrials ETF
-Industry,Industrials,AIRR,First Trust RBA American Industrial Renaissance ETF
-Industry,Industrials,CARZ,First Trust NASDAQ Global Auto ETF
-Industry,Industrials,FXR,First Trust Industrials/Producer Durables AlphaDEX ETF
-Industry,Industrials,GRID,First Trust Clean Edge Smart Grid Infrastructure ETF
-Industry,Industrials,RGI,Guggenheim S&P 500 Equal Weight Industrials ETF
-Industry,Industrials,SEA,Guggenheim Shipping ETF
-Industry,Industrials,EXI,iShares Global Industrials ETF
-Industry,Industrials,ITA,iShares U.S. Aerospace & Defense ETF
-Industry,Industrials,IYJ,iShares U.S. Industrials ETF
-Industry,Industrials,IYT,iShares Transportation Average ETF
-Industry,Industrials,EVX,Market Vectors Environmental Services ETF
-Industry,Industrials,PPA,Invesco Aerospace & Defense ETF
-Industry,Industrials,PRN,Invesco DWA Industrials Momentum ETF
-Industry,Industrials,PSCI,Invesco S&P SmallCap Industrials ETF
-Industry,Industrials,XAR,SPDR S&P Aerospace & Defense ETF
-Industry,Industrials,XTN,SPDR S&P Transportation ETF
-Industry,Industrials,VIS,Vanguard Industrials ETF
-Industry,Industrials,JETS,U.S. Global Jets ETF
-Commodity,Precious Metals,GLTR,abrdn Physical Precious Metals Basket ETF
-Commodity,Industrial Metals,PPLT,abrdn Physical Platinum Shares ETF
-Commodity,Industrial Metals,SLV,iShares Silver Trust
-Commodity,Energy,PDBC,Invesco Optimum Yield Diversified Commodity Strategy
-Commodity,Agriculture,COM,Direxion Auspice Broad Commodity Strategy ETF
-Commodity,Broad,COMB,GraniteShares Bloomberg Commodity Broad Strategy ETF
-Commodity,Broad,BCI,abrdn Bloomberg All Commodity Strategy K-1 Free ETF
-Commodity,Broad,CMDY,iShares Bloomberg Roll Select Commodity Strategy ETF
-Commodity,Broad,BCD,abrdn Bloomberg All Commodity Longer Dated Strategy ETF
-Commodity,Broad,COMT,iShares GSCI Commodity Dynamic Roll ETF
-Commodity,Broad,GCC,WisdomTree Enhanced Commodity Strategy Fund
-Commodity,Broad,SDCI,USCF SummerHaven Dynamic Commodity Strategy Fund
+Industry,Ticker,Name
+Energy (Equity),XLE,Energy Select Sector SPDR Fund
+Materials,XLB,Materials Select Sector SPDR Fund
+Metals & Mining (Equity),XME,SPDR S&P Metals & Mining ETF
+Aerospace & Defense,ITA,iShares U.S. Aerospace & Defense ETF
+Construction & Engineering,ITB,iShares U.S. Home Construction ETF
+Electrical Equipment,AIRR,First Trust RBA American Industrial Renaissance
+Industrial Conglomerates,XLI,Industrial Select Sector SPDR Fund
+Machinery,IYJ,iShares U.S. Industrials ETF
+Trading Companies & Distributors,XLI,Industrial Select Sector SPDR Fund
+Transportation,IYT,iShares U.S. Transportation ETF
+Automobiles & Components,CARZ,First Trust Nasdaq Global Auto Index
+Consumer Durables & Apparel,XHB,SPDR S&P Homebuilders ETF
+Consumer Services,PEJ,Invesco Leisure and Entertainment ETF
+Retailing,XRT,SPDR S&P Retail ETF
+"Food, Beverage & Tobacco",PBJ,Invesco Food & Beverage ETF
+Household & Personal Products,XLP,Consumer Staples Select Sector SPDR
+Health Care Equipment & Services,XHE,SPDR S&P Health Care Equipment ETF
+"Pharmaceuticals, Biotech & Life Sciences",XBI,SPDR S&P Biotech ETF
+Banks,KBE,SPDR S&P Bank ETF
+Financial Services,KCE,SPDR S&P Capital Markets ETF
+Insurance,KIE,SPDR S&P Insurance ETF
+Software & Services,IGV,iShares Expanded Tech-Software Sector
+Semiconductors & Equipment,SOXX,iShares Semiconductor ETF
+Telecommunication Services,IYZ,iShares U.S. Telecommunications ETF
+Media & Entertainment,XLC,Communication Services Select Sector
+Gold (Physical),GLD,SPDR Gold Shares
+Silver (Physical),SLV,iShares Silver Trust
+Platinum (Physical),PPLT,abrdn Physical Platinum Shares ETF
+Palladium (Physical),PALL,abrdn Physical Palladium Shares ETF
+Crude Oil (WTI),USO,United States Oil Fund LP
+Brent Crude,BNO,United States Brent Oil Fund LP
+Natural Gas,UNG,United States Natural Gas Fund LP
+Copper,CPER,United States Copper Index Fund
+Industrial Metals (Broad),DBB,Invesco DB Base Metals Fund
+Broad Agriculture,DBA,Invesco DB Agriculture Fund
+Corn,CORN,Teucrium Corn Fund
+Wheat,WEAT,Teucrium Wheat Fund
+Soybeans,SOYB,Teucrium Soybean Fund
+Sugar,CANE,Teucrium Sugar Fund
+Coffee,JO,iPath Series B Bloomberg Coffee ETN
+Broad Commodities,GSG,iShares S&P GSCI Commodity-Indexed Trust
