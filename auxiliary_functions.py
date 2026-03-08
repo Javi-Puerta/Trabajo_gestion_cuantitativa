@@ -56,3 +56,54 @@ def calculate_beta(returns: pd.Series, market_returns: pd.Series, period: int) -
     cov = returns.rolling(period).cov(aligned)
     var = aligned.rolling(period).var()
     return cov / var.replace(0, np.nan)
+
+def compute_performance_metrics(level_series: pd.Series, periods_per_year: int = 52,
+                                rf_annual: float = 0.0) -> dict:
+    """
+    Calcula métricas de performance a partir de una serie de niveles de cartera.
+    """
+    s = level_series.dropna()
+    r = s.pct_change().dropna()
+
+    rf_period = (1 + rf_annual) ** (1 / periods_per_year) - 1
+
+    total_return = (1 + r).prod() - 1
+    ann_return = (1 + total_return) ** (periods_per_year / len(r)) - 1
+    ann_vol = r.std(ddof=1) * np.sqrt(periods_per_year)
+
+    excess = r - rf_period
+    sharpe = np.nan if ann_vol == 0 or pd.isna(ann_vol) else (excess.mean() * periods_per_year) / ann_vol
+
+    downside = np.minimum(excess, 0.0)
+    downside_vol = np.sqrt((downside ** 2).mean()) * np.sqrt(periods_per_year)
+    sortino = np.nan if downside_vol == 0 or pd.isna(downside_vol) else (excess.mean() * periods_per_year) / downside_vol
+
+    equity = (1 + r).cumprod()
+    drawdown = equity / equity.cummax() - 1
+    max_dd = drawdown.min()
+
+    calmar = np.nan if max_dd == 0 or pd.isna(max_dd) else ann_return / abs(max_dd)
+
+    return {
+        "Rentabilidad total": total_return,
+        "Rentabilidad anualizada": ann_return,
+        "Volatilidad anualizada": ann_vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max Drawdown": max_dd,
+        "Calmar": calmar,
+        "Win rate": (r > 0).mean(),
+        "Mejor periodo": r.max(),
+        "Peor periodo": r.min(),
+    }
+
+
+def build_metrics_table(series_dict: dict[str, pd.Series], periods_per_year: int = 52,
+                        rf_annual: float = 0.0) -> pd.DataFrame:
+    """
+    Recibe {'Nombre': serie_de_nivel} y devuelve una tabla comparativa de métricas.
+    """
+    rows = {}
+    for name, serie in series_dict.items():
+        rows[name] = compute_performance_metrics(serie, periods_per_year, rf_annual)
+    return pd.DataFrame(rows).T

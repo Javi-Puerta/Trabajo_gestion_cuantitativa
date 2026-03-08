@@ -3,26 +3,16 @@ import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from IPython.display import display
 
+from IPython.display import display
 from UniversoActivos import UniversoActivosBase
 from ProveedorDatos import ProveedorDatosBase
 from VariablesTransformation import FeatureEngineer
 from Modelos import ModeloBase
 from Estrategia import EstrategiaBase
+from auxiliary_functions import build_metrics_table
 
 class BacktestEngine:
-    @staticmethod
-    def _calcular_costes(tickers: list) -> dict:
-        """
-        Calcula los costes de transacción de comprar/vender cada activo. Estos costes son estáticos
-        para cada activo.
-        """
-        costes = {}
-        for ticker in tickers:
-            costes[ticker] = 0.001 # 0.1% de coste por operación, por ejemplo
-        return costes
-
     def __init__(self, universo: UniversoActivosBase, proveedor: ProveedorDatosBase,
                     feature_engineer: FeatureEngineer, estrategia: EstrategiaBase,
                     start_date: str, end_date: str, len_ventana: int,
@@ -44,7 +34,17 @@ class BacktestEngine:
         self.df     = self.fe.build(df_weekly, df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
 
         self.composiciones = {} #diccinario fecha -> tickers
-    
+
+    def _calcular_costes(self, tickers: list) -> dict:
+        """
+        Calcula los costes de transacción de comprar/vender cada activo. Estos costes son estáticos
+        para cada activo.
+        """
+        costes = {}
+        for ticker in tickers:
+            costes[ticker] = 0.0005 # 0.05% de coste por operación, por ejemplo
+        return costes
+        
     def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
         fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
         train = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
@@ -147,10 +147,12 @@ class BacktestEngine:
         return pd.DataFrame(list(historial_neto.items()), columns=["Fecha", "Valor cartera"])
     
     def print_results(self, bmks: list, bmk_equal_weight: list | None) -> None:
-        df_estrategia = self._run()
+        serie_estrategia = self._run().set_index("Fecha")["Valor cartera"]
         # Normalizamos para comparar con benchmarks
-        serie_estrategia = df_estrategia["Valor cartera"] / df_estrategia["Valor cartera"].iloc[0]
-        fechas = df_estrategia["Fecha"]
+        serie_estrategia = serie_estrategia / serie_estrategia.iloc[0]
+        fechas = serie_estrategia.index
+
+        series_comp = {"Estrategia": serie_estrategia}
 
         plt.figure(figsize=(12, 6))
         plt.plot(fechas, serie_estrategia, label="Estrategia", linewidth=2)
@@ -160,8 +162,10 @@ class BacktestEngine:
                                                        self.end_date.strftime("%Y-%m-%d"))
             df_bmk["Fecha"] = pd.to_datetime(df_bmk["Fecha"])
             serie_bmk = df_bmk.set_index("Fecha")["Precio_Close"].reindex(fechas).ffill()
+            serie_bmk = serie_bmk / serie_bmk.iloc[0]
+            series_comp[bmk] = serie_bmk
 
-            plt.plot(fechas, serie_bmk / serie_bmk.iloc[0], label=bmk, linestyle="--")
+            plt.plot(fechas, serie_bmk, label=bmk, linestyle="--")
 
         if bmk_equal_weight: # Benchmark equiponderado
             df_ew = self.proveedor.download_prices_daily(bmk_equal_weight,
@@ -174,11 +178,29 @@ class BacktestEngine:
             )
             serie_ew = (1 + precios.pct_change().mean(axis=1, skipna=True).fillna(0)).cumprod()
             serie_ew = serie_ew.reindex(fechas).ffill()
-            plt.plot(fechas, serie_ew / serie_ew.iloc[0], label="Benchmark EW", linestyle=":")
+            serie_ew = serie_ew / serie_ew.iloc[0]
+            plt.plot(fechas, serie_ew, label="Benchmark EW", linestyle=":")
+            series_comp["Benchmark EW"] = serie_ew
 
         plt.title("Evolución de la cartera vs Benchmarks")
         plt.xlabel("Fecha")
         plt.legend()
         plt.show()
+
+        # Tabla de métricas de performance
+        metrics_view = build_metrics_table(series_comp, periods_per_year=52, rf_annual=0.0).T
+
+        pct_rows = {
+            "Rentabilidad total", "Rentabilidad anualizada", "Volatilidad anualizada",
+            "Max Drawdown", "Win rate", "Mejor periodo", "Peor periodo"
+        }
+
+        metrics_view = metrics_view.apply(
+            lambda row: row.map(lambda x: f"{x:.2%}") if row.name in pct_rows
+            else row.map(lambda x: f"{x:.2f}"),
+            axis=1
+        )
+
+        display(metrics_view)
 
         return None
