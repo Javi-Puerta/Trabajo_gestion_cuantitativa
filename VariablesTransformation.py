@@ -27,10 +27,10 @@ class FeatureEngineer:
 
     # helper: clip por quantiles por Ticker
     @staticmethod
-    def _clip_by_quantiles(df, col, low_q=0.01, high_q=0.99):
-        low = df.groupby("Ticker")[col].transform(lambda s: s.quantile(low_q))
-        high = df.groupby("Ticker")[col].transform(lambda s: s.quantile(high_q))
-        df[col] = df[col].clip(lower=low, upper=high)
+    def _clip_by_quantiles(df, cols, low_q=0.01, high_q=0.99):
+        low = df.groupby("Ticker")[cols].transform(lambda s: s.quantile(low_q))
+        high = df.groupby("Ticker")[cols].transform(lambda s: s.quantile(high_q))
+        df[cols] = df[cols].clip(lower=low, upper=high)
 
     def build(self, df_weekly: pd.DataFrame, df_daily: pd.DataFrame) -> pd.DataFrame:
         df = df_weekly.copy().sort_values(["Ticker", "Fecha"])
@@ -94,12 +94,9 @@ class FeatureEngineer:
         # ----------------------------------------------------------------
         # Winsorize / clip de columnas problemáticas (por ticker)
         # ----------------------------------------------------------------
-        for c in ["Momentum_1M", "Momentum_6M", "Mom_12m_ex_1m", "Volatilidad_1M", "Vol_ratio_1m_6m", "DD_6m", "VolumenUSD_z_20", "Turnover_20w"]:
-            if c in df.columns:
-                try:
-                    self._clip_by_quantiles(df, c, 0.01, 0.99)
-                except Exception:
-                    pass
+        cols_to_clip = [c for c in ["Momentum_1M", "Momentum_6M", "Mom_12m_ex_1m", "Volatilidad_1M", "Vol_ratio_1m_6m", "DD_6m", "VolumenUSD_z_20", "Turnover_20w"] if c in df.columns]
+        if cols_to_clip:
+            self._clip_by_quantiles(df, cols_to_clip, 0.01, 0.99)
 
         # ----------------------------------------------------------------
         # Features finales (conjunto reducido y balanceado)
@@ -136,19 +133,17 @@ class FeatureEngineer:
         df = df_daily.copy().sort_values(["Ticker", "Fecha"])
         df["Fecha"] = pd.to_datetime(df["Fecha"])
 
-        # RSI (solo 14)
-        df["RSI_14"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_rsi(x, 14))
+        def calc_features(g):
+            p = g["Precio_Close"]
+            g["RSI_14"] = calculate_rsi(p, 14)
+            g["MACD"] = calculate_macd(p)
+            g["Log_Precio_SMA_50"] = np.log(p / p.rolling(50, min_periods=10).mean())
+            g["Log_Precio_SMA_200"] = np.log(p / p.rolling(200, min_periods=50).mean())
+            g["Log_Precio_EMA_50"] = np.log(p / p.ewm(span=50, adjust=False).mean())
+            g["Log_Precio_EMA_200"] = np.log(p / p.ewm(span=200, adjust=False).mean())
+            return g
 
-        # MACD
-        df["MACD"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_macd(x))
-
-        # SMA 50 y 200 (log ratios)
-        df["Log_Precio_SMA_50"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.rolling(50, min_periods=10).mean()))
-        df["Log_Precio_SMA_200"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.rolling(200, min_periods=50).mean()))
-
-        # EMA 50 y 200
-        df["Log_Precio_EMA_50"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.ewm(span=50, adjust=False).mean()))
-        df["Log_Precio_EMA_200"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.ewm(span=200, adjust=False).mean()))
+        df = df.groupby("Ticker", group_keys=False).apply(calc_features)
 
         # Resamplear al último valor de cada semana
         daily_feature_cols = [
