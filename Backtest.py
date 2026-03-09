@@ -29,8 +29,9 @@ class BacktestEngine:
 
         all_tickers = self.universo.get_full_ticker_list()
         self.costes = self._calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
-        df_daily    = proveedor.download_prices_daily(all_tickers, start_date, end_date)
-        df_weekly   = proveedor.download_prices_weekly(all_tickers, start_date, end_date)
+        data_start_date = self.start_date - pd.DateOffset(years=self.len_ventana + 1)
+        df_daily    = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
+        df_weekly   = proveedor.download_prices_weekly(all_tickers, data_start_date, end_date)
         self.df     = self.fe.build(df_weekly, df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
 
         self.composiciones = {} #diccinario fecha -> tickers
@@ -117,11 +118,12 @@ class BacktestEngine:
         return cartera, pesos_adj, valor_total
     
     def _run(self) -> tuple[pd.DataFrame, float]:
-        fecha_inicio_bt = self.start_date + pd.DateOffset(years=self.len_ventana)
+        fecha_inicio_bt = self.start_date
         fechas = sorted(f for f in self.df["Fecha"].unique() if f >= fecha_inicio_bt)
 
         historial_neto = {}
         ultima_fecha_train = None
+        modelo_entrenado = False
         cartera = {"cash": self.VP} # Empezamos 100% en cash
         pesos = {"cash": 1.0}
 
@@ -130,13 +132,18 @@ class BacktestEngine:
 
             # Re-entrenamiento cada 6 meses
             if ultima_fecha_train is None or (fecha_hoy - ultima_fecha_train).days >= 180:
-                self._train(fecha_hoy, tickers_hoy)
-                ultima_fecha_train = fecha_hoy
+                train_flag = self._train(fecha_hoy, tickers_hoy)
+                if train_flag:
+                    ultima_fecha_train = fecha_hoy
+                    modelo_entrenado = True
+                    print(f"Modelo entrenado en fecha {fecha_hoy.date()}")
 
             datos_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
+            self.VP = self._mark_to_market(cartera, datos_hoy) # Valor actual de la cartera
 
-            #Calculamos el valor actual de la cartera
-            self.VP = self._mark_to_market(cartera, datos_hoy)
+            if not modelo_entrenado:
+                historial_neto[fecha_hoy] = self.VP
+                continue
 
             # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
             pesos_nuevos = self.estrategia.seleccionar(datos_hoy, self.fe.feature_cols, cartera)
