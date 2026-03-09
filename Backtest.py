@@ -57,10 +57,16 @@ class BacktestEngine:
         Calcula el valor de la cartera hoy, dada la cantidad en cash, la cantidad de acciones poseídas
         de cada ticker y los precios actuales.
         '''
-        precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"].to_dict()
-        return posi_anterior.get("cash", 0.0) + sum(
-            cant * precios_hoy.get(tk, np.nan) for tk, cant in posi_anterior.items() if tk != "cash"
-        )
+        valor_cartera = posi_anterior["cash"]
+        precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
+
+        for ticker, peso in posi_anterior.items():
+            if ticker == "cash":
+                continue
+            
+            valor_cartera += posi_anterior[ticker] * precios_hoy.get(ticker, np.nan)
+
+        return valor_cartera
     
     def _ajustar_cartera(self, cartera: dict, datos_hoy: pd.DataFrame, pesos: dict,
                          pesos_nuevos: dict) -> tuple[dict, dict, float]:
@@ -68,34 +74,46 @@ class BacktestEngine:
         Calcula la cartera ajustada, nuevos pesos y valor total de la cartera tras realizar un ajuste
         según unos pesos nuevos que se quieren obtener.
         '''
-        precios = datos_hoy.set_index("Ticker")["Precio_Close"].to_dict()
-        
-        for t in list(set(cartera.keys()) | set(pesos_nuevos.keys()) - {"cash"}):
-            p_venta = precios.get(t, np.nan) * (1 - self.costes.get(t, 0))
-            p_compra = precios.get(t, np.nan) * (1 + self.costes.get(t, 0))
-            
-            if t not in pesos_nuevos: # vendemos todo
-                cartera["cash"] += cartera.pop(t) * p_venta
-                pesos.pop(t, None)
-            elif t not in pesos: # compramos nuevo activo
-                cant = math.floor((pesos_nuevos[t] * self.VP) / p_compra)
-                cartera[t] = cant
-                cartera["cash"] -= cant * p_compra
+        precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
+        for ticker in set(cartera.keys()) | set(pesos_nuevos.keys()):
+            if ticker == "cash":
+                continue
+            elif ticker not in pesos_nuevos: # vendemos todo
+                precio_venta = precios_hoy.get(ticker, np.nan) * (1 - self.costes[ticker])
+                cartera["cash"] += cartera[ticker] * precio_venta
+                cartera.pop(ticker, None)
+                pesos.pop(ticker, None)
+            elif ticker not in pesos: # compramos nuevo activo
+                precio_compra = precios_hoy.get(ticker, np.nan) * (1 + self.costes[ticker])
+                cartera[ticker] = math.floor((pesos_nuevos[ticker] * self.VP) / precio_compra)
+                cartera["cash"] -= cartera[ticker] * precio_compra
             else: # ajustamos posición existente
-                ajuste = pesos_nuevos[t] - pesos[t]
-                if ajuste > 0:
-                    cant = math.floor((ajuste * self.VP) / p_compra)
-                    cartera[t] += cant
-                    cartera["cash"] -= cant * p_compra
-                elif ajuste < 0:
-                    cant = math.ceil((-ajuste * self.VP) / p_venta)
-                    cartera[t] -= cant
-                    cartera["cash"] += cant * p_venta
+                ajuste = pesos_nuevos[ticker] - pesos[ticker]
+                if ajuste > 0: # aumento de posición
+                    precio_compra = precios_hoy.get(ticker, np.nan) * (1 + self.costes[ticker])
+                    cant_compra = math.floor((ajuste * self.VP) / precio_compra)
+                    cartera[ticker] += cant_compra
+                    cartera["cash"] -= cant_compra * precio_compra
+                elif ajuste < 0: # reducción de posición
+                    precio_venta = precios_hoy.get(ticker, np.nan) * (1 - self.costes[ticker])
+                    cant_venta = math.ceil((-ajuste * self.VP) / precio_venta)
+                    cartera[ticker] -= cant_venta
+                    cartera["cash"] += cant_venta * precio_venta
 
-        valor_total = self._mark_to_market(cartera, datos_hoy)
-        
-        pesos_adj = {t: (c * precios.get(t, np.nan) / valor_total if t != "cash" else c / valor_total) 
-                     for t, c in cartera.items()}
+        # Calculamos el valor total de la cartera
+        valor_total = cartera["cash"]
+        for ticker, cantidad in cartera.items():
+            if ticker == "cash":
+                continue
+            valor_total += cantidad * precios_hoy.get(ticker, np.nan)
+
+        # Calculamos los pesos de cada activo
+        pesos_adj = {}
+        for ticker, cantidad in cartera.items():
+            if ticker == "cash":
+                pesos_adj["cash"] = cantidad / valor_total
+                continue
+            pesos_adj[ticker] = cantidad * precios_hoy.get(ticker, np.nan) / valor_total
 
         return cartera, pesos_adj, valor_total
     
