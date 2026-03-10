@@ -153,7 +153,7 @@ class BacktestEngine:
 
         return pd.DataFrame(list(historial_neto.items()), columns=["Fecha", "Valor cartera"])
     
-    def print_results(self, bmks: list, bmk_equal_weight: list | None) -> None:
+    def print_results(self, bmks: list | None = None, bmk_equal_weight: list | None = None) -> None:
         serie_estrategia = self._run().set_index("Fecha")["Valor cartera"]
         # Normalizamos para comparar con benchmarks
         serie_estrategia = serie_estrategia / serie_estrategia.iloc[0]
@@ -163,6 +163,9 @@ class BacktestEngine:
 
         plt.figure(figsize=(12, 6))
         plt.plot(fechas, serie_estrategia, label="Estrategia", linewidth=2)
+
+        if bmks is None:
+            bmks = []
 
         for bmk in bmks:
             df_bmk = self.proveedor.download_prices_daily(bmk, self.start_date.strftime("%Y-%m-%d"),
