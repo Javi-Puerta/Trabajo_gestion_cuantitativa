@@ -31,11 +31,8 @@ class RandomForestModel(ModeloBase):
             random_state=random_state,
         )
 
-    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
-        self.clf.fit(X, y)
-
-    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
-        return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None: self.clf.fit(X, y)
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series: return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)
     
 class XGBoostModel(ModeloBase):
     def __init__(self, n_estimators: int = 100, max_depth: int = 5,
@@ -53,8 +50,5 @@ class XGBoostModel(ModeloBase):
             eval_metric="logloss",
         )
 
-    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
-        self.clf.fit(X, y)
-
-    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
-        return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None: self.clf.fit(X, y)
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series: return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)

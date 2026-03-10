@@ -34,13 +34,8 @@ def calculate_bollinger(prices: pd.Series, period: int = 20, num_std: float = 2.
     period  : int       — ventana de la media móvil (default 20)
     num_std : float     — número de desviaciones típicas (default 2)
     """
-    sma = prices.rolling(period).mean()
-    std = prices.rolling(period).std()
-
-    upper_band = sma + num_std * std
-    lower_band = sma - num_std * std
-
-    return upper_band, lower_band
+    sma, std = prices.rolling(period).mean(), prices.rolling(period).std()
+    return sma + num_std * std, sma - num_std * std
 
 def calculate_beta(returns: pd.Series, market_returns: pd.Series, period: int) -> pd.Series:
     """
@@ -53,9 +48,7 @@ def calculate_beta(returns: pd.Series, market_returns: pd.Series, period: int) -
     period         : int       — ventana en semanas (ej: 52 para 12M)
     """
     aligned = market_returns.reindex(returns.index)
-    cov = returns.rolling(period).cov(aligned)
-    var = aligned.rolling(period).var()
-    return cov / var.replace(0, np.nan)
+    return returns.rolling(period).cov(aligned) / aligned.rolling(period).var().replace(0, np.nan)
 
 def compute_performance_metrics(level_series: pd.Series, periods_per_year: int = 52,
                                 rf_annual: float = 0.0) -> dict:
@@ -103,7 +96,4 @@ def build_metrics_table(series_dict: dict[str, pd.Series], periods_per_year: int
     """
     Recibe {'Nombre': serie_de_nivel} y devuelve una tabla comparativa de métricas.
     """
-    rows = {}
-    for name, serie in series_dict.items():
-        rows[name] = compute_performance_metrics(serie, periods_per_year, rf_annual)
-    return pd.DataFrame(rows).T
+    return pd.DataFrame({name: compute_performance_metrics(serie, periods_per_year, rf_annual) for name, serie in series_dict.items()}).T
