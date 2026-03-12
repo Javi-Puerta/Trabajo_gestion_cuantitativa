@@ -170,9 +170,8 @@ class BacktestEngine:
         return pd.DataFrame(list(historial_neto.items()), columns=["Fecha", "Valor cartera"])
     
     def print_results(self, bmks: list | None = None, bmk_equal_weight: list | None = None,
-                      plot: bool = True) -> None:
+                  plot: bool = True, oracle: bool = False) -> None:
         serie_estrategia = self._run().set_index("Fecha")["Valor cartera"]
-        # Normalizamos para comparar con benchmarks
         serie_estrategia = serie_estrategia / serie_estrategia.iloc[0]
         fechas = serie_estrategia.index
 
@@ -187,30 +186,32 @@ class BacktestEngine:
 
         for bmk in bmks:
             df_bmk = self.proveedor.download_prices_daily(bmk, self.start_date.strftime("%Y-%m-%d"),
-                                                       self.end_date.strftime("%Y-%m-%d"))
+                                                    self.end_date.strftime("%Y-%m-%d"))
             df_bmk["Fecha"] = pd.to_datetime(df_bmk["Fecha"])
             serie_bmk = df_bmk.set_index("Fecha")["Precio_Close"].reindex(fechas).ffill()
             serie_bmk = serie_bmk / serie_bmk.iloc[0]
             series_comp[bmk] = serie_bmk
-
             if plot:
                 plt.plot(fechas, serie_bmk, label=bmk, linestyle="--")
 
-        if bmk_equal_weight: # Benchmark equiponderado
+        if bmk_equal_weight:
             df_ew = self.proveedor.download_prices_daily(bmk_equal_weight,
-                                                         self.start_date.strftime("%Y-%m-%d"),
-                                                         self.end_date.strftime("%Y-%m-%d"))
-            precios = (
-                df_ew.assign(Fecha=pd.to_datetime(df_ew["Fecha"]))
-                .pivot(index="Fecha", columns="Ticker", values="Precio_Close")
-                .sort_index()
-            )
+                                                        self.start_date.strftime("%Y-%m-%d"),
+                                                        self.end_date.strftime("%Y-%m-%d"))
+            precios = (df_ew.assign(Fecha=pd.to_datetime(df_ew["Fecha"]))
+                    .pivot(index="Fecha", columns="Ticker", values="Precio_Close").sort_index())
             serie_ew = (1 + precios.pct_change().mean(axis=1, skipna=True).fillna(0)).cumprod()
             serie_ew = serie_ew.reindex(fechas).ffill()
             serie_ew = serie_ew / serie_ew.iloc[0]
+            series_comp["Benchmark EW"] = serie_ew
             if plot:
                 plt.plot(fechas, serie_ew, label="Benchmark EW", linestyle=":")
-            series_comp["Benchmark EW"] = serie_ew
+
+        if plot and oracle:
+            serie_oraculo = self._serie_oraculo()
+            serie_oraculo = serie_oraculo / serie_oraculo.iloc[0]
+            plt.plot(serie_oraculo.index, serie_oraculo, label="Oráculo Top15", 
+                    linestyle="-.", color="gold")
 
         if plot:
             plt.title("Evolución de la cartera vs Benchmarks")
@@ -218,14 +219,12 @@ class BacktestEngine:
             plt.legend()
             plt.show()
 
-        # Tabla de métricas de performance
         metrics_view = build_metrics_table(series_comp, periods_per_year=252, rf_annual=0.0).T
 
         pct_rows = {
             "Rentabilidad total", "Rentabilidad anualizada", "Volatilidad anualizada",
             "Max Drawdown", "Win rate", "Mejor periodo", "Peor periodo"
         }
-
         metrics_view = metrics_view.apply(
             lambda row: row.map(lambda x: f"{x:.2%}") if row.name in pct_rows
             else row.map(lambda x: f"{x:.2f}"),
@@ -236,3 +235,23 @@ class BacktestEngine:
             display(metrics_view)
 
         return fechas, serie_estrategia, metrics_view
+    
+    def _serie_oraculo(self, n: int = 15) -> pd.Series:
+        fechas = sorted(f for f in self.df["Fecha"].unique() 
+                        if (f >= self.start_date and f <= self.end_date))
+        
+        precios = (self.df[self.df["Fecha"].isin(fechas)]
+                .pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+                .sort_index())
+
+        retornos = precios.pct_change()
+        vp = 1
+        historial = {}
+
+        for i, fecha in enumerate(fechas[1:], 1):
+            top15 = retornos.loc[fecha].nlargest(n).index.tolist()
+            retorno_medio = retornos.loc[fecha, top15].mean()
+            vp *= (1 + retorno_medio)
+            historial[fecha] = vp
+
+        return pd.Series(historial)
