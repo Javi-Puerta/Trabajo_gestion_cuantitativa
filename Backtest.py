@@ -30,9 +30,9 @@ class BacktestEngine:
         all_tickers = self.universo.get_full_ticker_list()
         self.costes = self._calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
         data_start_date = self.start_date - pd.DateOffset(years=self.len_ventana + 1)
-        df_daily    = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
+        self.df_daily    = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
         df_weekly   = proveedor.download_prices_weekly(all_tickers, data_start_date, end_date)
-        self.df     = self.fe.build(df_weekly, df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
+        self.df     = self.fe.build(df_weekly, self.df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
 
         self.composiciones = {} #diccinario fecha -> tickers
 
@@ -78,24 +78,30 @@ class BacktestEngine:
         for ticker in set(cartera.keys()) | set(pesos_nuevos.keys()):
             if ticker == "cash":
                 continue
-            elif ticker not in pesos_nuevos: # vendemos todo
-                precio_venta = precios_hoy.get(ticker, np.nan) * (1 - self.costes[ticker])
+
+            precio = precios_hoy.get(ticker)
+            if pd.isna(precio):
+                # No podemos operar con este ticker hoy, lo ignoramos
+                continue
+
+            if ticker not in pesos_nuevos: # vendemos todo
+                precio_venta = precio * (1 - self.costes[ticker])
                 cartera["cash"] += cartera[ticker] * precio_venta
                 cartera.pop(ticker, None)
                 pesos.pop(ticker, None)
             elif ticker not in pesos: # compramos nuevo activo
-                precio_compra = precios_hoy.get(ticker, np.nan) * (1 + self.costes[ticker])
+                precio_compra = precio * (1 + self.costes[ticker])
                 cartera[ticker] = math.floor((pesos_nuevos[ticker] * self.VP) / precio_compra)
                 cartera["cash"] -= cartera[ticker] * precio_compra
             else: # ajustamos posición existente
                 ajuste = pesos_nuevos[ticker] - pesos[ticker]
                 if ajuste > 0: # aumento de posición
-                    precio_compra = precios_hoy.get(ticker, np.nan) * (1 + self.costes[ticker])
+                    precio_compra = precio * (1 + self.costes[ticker])
                     cant_compra = math.floor((ajuste * self.VP) / precio_compra)
                     cartera[ticker] += cant_compra
                     cartera["cash"] -= cant_compra * precio_compra
                 elif ajuste < 0: # reducción de posición
-                    precio_venta = precios_hoy.get(ticker, np.nan) * (1 - self.costes[ticker])
+                    precio_venta = precio * (1 - self.costes[ticker])
                     cant_venta = math.ceil((-ajuste * self.VP) / precio_venta)
                     cartera[ticker] -= cant_venta
                     cartera["cash"] += cant_venta * precio_venta
@@ -113,13 +119,21 @@ class BacktestEngine:
             if ticker == "cash":
                 pesos_adj["cash"] = cantidad / valor_total
                 continue
-            pesos_adj[ticker] = cantidad * precios_hoy.get(ticker, np.nan) / valor_total
+
+            precio = precios_hoy.get(ticker)
+            if pd.isna(precio):
+                # No podemos operar con este ticker hoy, lo ignoramos
+                continue
+            pesos_adj[ticker] = cantidad * precio / valor_total
 
         return cartera, pesos_adj, valor_total
     
     def _run(self) -> tuple[pd.DataFrame, float]:
         fecha_inicio_bt = self.start_date
-        fechas = sorted(f for f in self.df["Fecha"].unique() if f >= fecha_inicio_bt)
+        fecha_fin_bt = self.end_date
+        fechas = sorted(f for f in self.df["Fecha"].unique() if (f >= fecha_inicio_bt and f <= fecha_fin_bt))
+
+        fechas_diarias = sorted(f for f in self.df_daily["Fecha"].unique() if (f >= fecha_inicio_bt and f <= fecha_fin_bt))
 
         historial_neto = {}
         ultima_fecha_train = None
@@ -127,33 +141,36 @@ class BacktestEngine:
         cartera = {"cash": self.VP} # Empezamos 100% en cash
         pesos = {"cash": 1.0}
 
-        for fecha_hoy in fechas[:-1]:
-            tickers_hoy =self.universo.get_universe_at_date(fecha_hoy)
-
-            # Re-entrenamiento cada 6 meses
-            if ultima_fecha_train is None or (fecha_hoy - ultima_fecha_train).days >= 180:
-                train_flag = self._train(fecha_hoy, tickers_hoy)
-                if train_flag:
-                    ultima_fecha_train = fecha_hoy
-                    modelo_entrenado = True
-                    print(f"Modelo entrenado en fecha {fecha_hoy.date()}")
-
-            datos_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
-            self.VP = self._mark_to_market(cartera, datos_hoy) # Valor actual de la cartera
-
-            if not modelo_entrenado:
-                historial_neto[fecha_hoy] = self.VP
-                continue
-
-            # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
-            pesos_nuevos = self.estrategia.seleccionar(datos_hoy, self.fe.feature_cols, cartera)
-            cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos, pesos_nuevos)
-            
+        for fecha_hoy in fechas_diarias:
+            datos_hoy = self.df_daily[self.df_daily["Fecha"] == fecha_hoy].copy()
+            self.VP = self._mark_to_market(cartera, datos_hoy)
             historial_neto[fecha_hoy] = self.VP
+
+            if fecha_hoy in fechas[:-1]:
+                tickers_hoy =self.universo.get_universe_at_date(fecha_hoy)
+
+                # Re-entrenamiento cada 6 meses
+                if ultima_fecha_train is None or (fecha_hoy - ultima_fecha_train).days >= 180:
+                    train_flag = self._train(fecha_hoy, tickers_hoy)
+                    if train_flag:
+                        ultima_fecha_train = fecha_hoy
+                        modelo_entrenado = True
+                        print(f"Modelo entrenado en fecha {fecha_hoy.date()}")
+
+                if not modelo_entrenado:
+                    continue
+
+                # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
+                datos_features_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
+                pesos_nuevos = self.estrategia.seleccionar(datos_features_hoy, self.fe.feature_cols, cartera)
+                cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos, pesos_nuevos)
+                
+                historial_neto[fecha_hoy] = self.VP
 
         return pd.DataFrame(list(historial_neto.items()), columns=["Fecha", "Valor cartera"])
     
-    def print_results(self, bmks: list | None = None, bmk_equal_weight: list | None = None) -> None:
+    def print_results(self, bmks: list | None = None, bmk_equal_weight: list | None = None,
+                      plot: bool = True) -> None:
         serie_estrategia = self._run().set_index("Fecha")["Valor cartera"]
         # Normalizamos para comparar con benchmarks
         serie_estrategia = serie_estrategia / serie_estrategia.iloc[0]
@@ -161,8 +178,9 @@ class BacktestEngine:
 
         series_comp = {"Estrategia": serie_estrategia}
 
-        plt.figure(figsize=(12, 6))
-        plt.plot(fechas, serie_estrategia, label="Estrategia", linewidth=2)
+        if plot:
+            plt.figure(figsize=(12, 6))
+            plt.plot(fechas, serie_estrategia, label="Estrategia", linewidth=2)
 
         if bmks is None:
             bmks = []
@@ -175,7 +193,8 @@ class BacktestEngine:
             serie_bmk = serie_bmk / serie_bmk.iloc[0]
             series_comp[bmk] = serie_bmk
 
-            plt.plot(fechas, serie_bmk, label=bmk, linestyle="--")
+            if plot:
+                plt.plot(fechas, serie_bmk, label=bmk, linestyle="--")
 
         if bmk_equal_weight: # Benchmark equiponderado
             df_ew = self.proveedor.download_prices_daily(bmk_equal_weight,
@@ -189,16 +208,18 @@ class BacktestEngine:
             serie_ew = (1 + precios.pct_change().mean(axis=1, skipna=True).fillna(0)).cumprod()
             serie_ew = serie_ew.reindex(fechas).ffill()
             serie_ew = serie_ew / serie_ew.iloc[0]
-            plt.plot(fechas, serie_ew, label="Benchmark EW", linestyle=":")
+            if plot:
+                plt.plot(fechas, serie_ew, label="Benchmark EW", linestyle=":")
             series_comp["Benchmark EW"] = serie_ew
 
-        plt.title("Evolución de la cartera vs Benchmarks")
-        plt.xlabel("Fecha")
-        plt.legend()
-        plt.show()
+        if plot:
+            plt.title("Evolución de la cartera vs Benchmarks")
+            plt.xlabel("Fecha")
+            plt.legend()
+            plt.show()
 
         # Tabla de métricas de performance
-        metrics_view = build_metrics_table(series_comp, periods_per_year=52, rf_annual=0.0).T
+        metrics_view = build_metrics_table(series_comp, periods_per_year=252, rf_annual=0.0).T
 
         pct_rows = {
             "Rentabilidad total", "Rentabilidad anualizada", "Volatilidad anualizada",
@@ -211,6 +232,7 @@ class BacktestEngine:
             axis=1
         )
 
-        display(metrics_view)
+        if plot:
+            display(metrics_view)
 
-        return None
+        return fechas, serie_estrategia, metrics_view

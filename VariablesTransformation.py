@@ -82,7 +82,7 @@ class FeatureEngineer:
         df["Retorno_t1"] = df.groupby("Ticker")["Retorno_1W"].shift(1)
         df["Retorno_t2"] = df.groupby("Ticker")["Retorno_1W"].shift(2)
 
-        # Target (igual que antes)
+        # Target: el retorno la semana siguiente. Luego se convertirá a clasificación según el criterio elegido.
         df["Retorno_Next_Week"] = df.groupby("Ticker")["Retorno_1W"].shift(-1)
         if self.criterio == "mediana":
             mediana = df.groupby("Fecha")["Retorno_Next_Week"].transform("median")

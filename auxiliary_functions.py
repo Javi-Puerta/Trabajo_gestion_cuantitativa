@@ -50,7 +50,7 @@ def calculate_beta(returns: pd.Series, market_returns: pd.Series, period: int) -
     aligned = market_returns.reindex(returns.index)
     return returns.rolling(period).cov(aligned) / aligned.rolling(period).var().replace(0, np.nan)
 
-def compute_performance_metrics(level_series: pd.Series, periods_per_year: int = 52,
+def compute_performance_metrics(level_series: pd.Series, periods_per_year: int = 252,
                                 rf_annual: float = 0.0) -> dict:
     """
     Calcula métricas de performance a partir de una serie de niveles de cartera.
@@ -91,7 +91,7 @@ def compute_performance_metrics(level_series: pd.Series, periods_per_year: int =
     }
 
 
-def build_metrics_table(series_dict: dict[str, pd.Series], periods_per_year: int = 52,
+def build_metrics_table(series_dict: dict[str, pd.Series], periods_per_year: int = 252,
                         rf_annual: float = 0.0) -> pd.DataFrame:
     """
     Recibe {'Nombre': serie_de_nivel} y devuelve una tabla comparativa de métricas.
