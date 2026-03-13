@@ -59,8 +59,6 @@ class EstrategiaMLEquiponderada(EstrategiaBase):
     def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
                     cartera: dict[str, float]) -> dict[str, float]:
         datos = df_hoy.copy()
-        if datos.empty:
-            return {}
 
         proba = self.modelo.predict_proba(datos[feature_cols])
         datos["Score"] = proba[:, 1] if getattr(proba, "ndim", 1) > 1 else proba

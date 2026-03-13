@@ -30,11 +30,9 @@ class BacktestEngine:
         all_tickers = self.universo.get_full_ticker_list()
         self.costes = self._calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
         data_start_date = self.start_date - pd.DateOffset(years=self.len_ventana + 1)
-        self.df_daily    = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
+        self.df_daily = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
         df_weekly   = proveedor.download_prices_weekly(all_tickers, data_start_date, end_date)
-        self.df     = self.fe.build(df_weekly, self.df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
-
-        self.composiciones = {} #diccinario fecha -> tickers
+        self.df = self.fe.build(df_weekly, self.df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
 
     def _calcular_costes(self, tickers: list) -> dict:
         """
@@ -48,39 +46,56 @@ class BacktestEngine:
         
     def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
         fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
-        train = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
+        train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
         
-        return self.estrategia.train(train, self.fe.feature_cols, tickers_validos)
+        return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos)
     
-    def _mark_to_market(self, posi_anterior: dict, datos_hoy: pd.DataFrame) -> float:
+    def _mark_to_market(self, cartera: dict, datos_hoy: pd.DataFrame) -> float:
         '''
         Calcula el valor de la cartera hoy, dada la cantidad en cash, la cantidad de acciones poseídas
         de cada ticker y los precios actuales.
         '''
-        valor_cartera = posi_anterior["cash"]
+        valor_cartera = cartera["cash"]
         precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
 
-        for ticker, peso in posi_anterior.items():
+        for ticker, cantidad in cartera.items():
             if ticker == "cash":
                 continue
             
-            valor_cartera += posi_anterior[ticker] * precios_hoy.get(ticker, np.nan)
+            valor_cartera += cantidad * precios_hoy.get(ticker, np.nan)
 
         return valor_cartera
+
+    def _ajustar_pesos(self, cartera: dict, precios_hoy) -> dict[str, float]:
+        pesos = {}
+        for ticker, cantidad in cartera.items():
+            if ticker == "cash":
+                pesos["cash"] = cantidad / self.VP
+                continue
+
+            precio = precios_hoy.get(ticker)
+            if pd.isna(precio):
+                # No podemos operar con este ticker hoy, lo ignoramos
+                continue
+            pesos[ticker] = cantidad * precio / self.VP
+
+        return pesos
     
-    def _ajustar_cartera(self, cartera: dict, datos_hoy: pd.DataFrame, pesos: dict,
+    def _ajustar_cartera(self, cartera: dict, datos_hoy: pd.DataFrame,
                          pesos_nuevos: dict) -> tuple[dict, dict, float]:
         '''
         Calcula la cartera ajustada, nuevos pesos y valor total de la cartera tras realizar un ajuste
         según unos pesos nuevos que se quieren obtener.
         '''
         precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
+        pesos_antiguos = self._ajustar_pesos(cartera, precios_hoy) # Calculamos los pesos reales antes del ajuste
+
         for ticker in set(cartera.keys()) | set(pesos_nuevos.keys()):
             if ticker == "cash":
                 continue
 
             precio = precios_hoy.get(ticker)
-            if pd.isna(precio):
+            if pd.isna(precio): #REVISAR
                 # No podemos operar con este ticker hoy, lo ignoramos
                 continue
 
@@ -88,13 +103,13 @@ class BacktestEngine:
                 precio_venta = precio * (1 - self.costes[ticker])
                 cartera["cash"] += cartera[ticker] * precio_venta
                 cartera.pop(ticker, None)
-                pesos.pop(ticker, None)
-            elif ticker not in pesos: # compramos nuevo activo
+                pesos_antiguos.pop(ticker, None)
+            elif ticker not in pesos_antiguos: # compramos nuevo activo
                 precio_compra = precio * (1 + self.costes[ticker])
                 cartera[ticker] = math.floor((pesos_nuevos[ticker] * self.VP) / precio_compra)
                 cartera["cash"] -= cartera[ticker] * precio_compra
             else: # ajustamos posición existente
-                ajuste = pesos_nuevos[ticker] - pesos[ticker]
+                ajuste = pesos_nuevos[ticker] - pesos_antiguos[ticker]
                 if ajuste > 0: # aumento de posición
                     precio_compra = precio * (1 + self.costes[ticker])
                     cant_compra = math.floor((ajuste * self.VP) / precio_compra)
@@ -113,24 +128,15 @@ class BacktestEngine:
                 continue
             valor_total += cantidad * precios_hoy.get(ticker, np.nan)
 
-        # Calculamos los pesos de cada activo
-        pesos_adj = {}
-        for ticker, cantidad in cartera.items():
-            if ticker == "cash":
-                pesos_adj["cash"] = cantidad / valor_total
-                continue
-
-            precio = precios_hoy.get(ticker)
-            if pd.isna(precio):
-                # No podemos operar con este ticker hoy, lo ignoramos
-                continue
-            pesos_adj[ticker] = cantidad * precio / valor_total
+        # Calculamos los pesos de cada activo tras el ajuste
+        pesos_adj = self._ajustar_pesos(cartera, precios_hoy)
 
         return cartera, pesos_adj, valor_total
     
     def _run(self) -> tuple[pd.DataFrame, float]:
         fecha_inicio_bt = self.start_date
         fecha_fin_bt = self.end_date
+        # fechas semanales
         fechas = sorted(f for f in self.df["Fecha"].unique() if (f >= fecha_inicio_bt and f <= fecha_fin_bt))
 
         fechas_diarias = sorted(f for f in self.df_daily["Fecha"].unique() if (f >= fecha_inicio_bt and f <= fecha_fin_bt))
@@ -147,7 +153,7 @@ class BacktestEngine:
             historial_neto[fecha_hoy] = self.VP
 
             if fecha_hoy in fechas[:-1]:
-                tickers_hoy =self.universo.get_universe_at_date(fecha_hoy)
+                tickers_hoy = self.universo.get_universe_at_date(fecha_hoy)
 
                 # Re-entrenamiento cada 6 meses
                 if ultima_fecha_train is None or (fecha_hoy - ultima_fecha_train).days >= 180:
@@ -155,15 +161,16 @@ class BacktestEngine:
                     if train_flag:
                         ultima_fecha_train = fecha_hoy
                         modelo_entrenado = True
-                        print(f"Modelo entrenado en fecha {fecha_hoy.date()}")
+                        #print(f"Modelo entrenado en fecha {fecha_hoy.date()}")
 
                 if not modelo_entrenado:
+                    print(f"fallo al entrenar el modelo a fecha {fecha_hoy.date()}")
                     continue
 
                 # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
                 datos_features_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
                 pesos_nuevos = self.estrategia.seleccionar(datos_features_hoy, self.fe.feature_cols, cartera)
-                cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos, pesos_nuevos)
+                cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos_nuevos)
                 
                 historial_neto[fecha_hoy] = self.VP
 

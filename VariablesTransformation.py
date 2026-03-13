@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-from auxiliary_functions import calculate_rsi, calculate_macd, calculate_bollinger, calculate_beta
+from auxiliary_functions import calculate_rsi, calculate_macd, _rolling_std
 
 class FeatureEngineer:
     """
@@ -20,17 +20,38 @@ class FeatureEngineer:
         self.ticker_indice = ticker_indice
         self.feature_cols: list[str] = []
 
-    @staticmethod
-    def _rolling_std(x, window):
-        minp = max(1, window // 2)
-        return x.rolling(window, min_periods=minp).std()
+    def _build_daily_features(self, df_daily: pd.DataFrame) -> pd.DataFrame:
+        df = df_daily.copy().sort_values(["Ticker", "Fecha"])
+        df["Fecha"] = pd.to_datetime(df["Fecha"])
 
-    # helper: clip por quantiles por Ticker
-    @staticmethod
-    def _clip_by_quantiles(df, col, low_q=0.01, high_q=0.99):
-        low = df.groupby("Ticker")[col].transform(lambda s: s.quantile(low_q))
-        high = df.groupby("Ticker")[col].transform(lambda s: s.quantile(high_q))
-        df[col] = df[col].clip(lower=low, upper=high)
+        # RSI (solo 14)
+        df["RSI_14"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_rsi(x, 14))
+
+        # MACD
+        df["MACD"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_macd(x))
+
+        # SMA 50 y 200 (log ratios)
+        df["Log_Precio_SMA_50"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.rolling(50, min_periods=10).mean()))
+        df["Log_Precio_SMA_200"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.rolling(200, min_periods=50).mean()))
+
+        # EMA 50 y 200
+        df["Log_Precio_EMA_50"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.ewm(span=50, adjust=False).mean()))
+        df["Log_Precio_EMA_200"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.ewm(span=200, adjust=False).mean()))
+
+        # Resamplear al último valor de cada semana
+        daily_feature_cols = [
+            "RSI_14", "MACD",
+            "Log_Precio_SMA_50", "Log_Precio_SMA_200",
+            "Log_Precio_EMA_50", "Log_Precio_EMA_200"
+        ]
+
+        weekly = (
+            df.groupby("Ticker")[["Fecha"] + daily_feature_cols]
+            .apply(lambda g: g.set_index("Fecha").resample("W-WED").last())
+            .reset_index()
+        )
+
+        return weekly
 
     def build(self, df_weekly: pd.DataFrame, df_daily: pd.DataFrame) -> pd.DataFrame:
         df = df_weekly.copy().sort_values(["Ticker", "Fecha"])
@@ -64,8 +85,8 @@ class FeatureEngineer:
             df["RetRel_SPY_3m"] = df["Ret_3m_activo"] - df["Ret_3m_ind"]
 
         # Volatilidades (calculadas, pero incluimos solo la corta + ratio)
-        df["Volatilidad_6M"] = df.groupby("Ticker")["Retorno_1W"].transform(lambda x: self._rolling_std(x, 26))
-        df["Volatilidad_1M"] = df.groupby("Ticker")["Retorno_1W"].transform(lambda x: self._rolling_std(x, 4))
+        df["Volatilidad_6M"] = df.groupby("Ticker")["Retorno_1W"].transform(lambda x: _rolling_std(x, 26))
+        df["Volatilidad_1M"] = df.groupby("Ticker")["Retorno_1W"].transform(lambda x: _rolling_std(x, 4))
         df["Vol_ratio_1m_6m"] = df["Volatilidad_1M"] / df["Volatilidad_6M"].replace(0, np.nan)
 
         # Drawdown 6m
@@ -131,36 +152,3 @@ class FeatureEngineer:
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
 
         return df.reset_index(drop=True)
-
-    def _build_daily_features(self, df_daily: pd.DataFrame) -> pd.DataFrame:
-        df = df_daily.copy().sort_values(["Ticker", "Fecha"])
-        df["Fecha"] = pd.to_datetime(df["Fecha"])
-
-        # RSI (solo 14)
-        df["RSI_14"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_rsi(x, 14))
-
-        # MACD
-        df["MACD"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_macd(x))
-
-        # SMA 50 y 200 (log ratios)
-        df["Log_Precio_SMA_50"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.rolling(50, min_periods=10).mean()))
-        df["Log_Precio_SMA_200"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.rolling(200, min_periods=50).mean()))
-
-        # EMA 50 y 200
-        df["Log_Precio_EMA_50"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.ewm(span=50, adjust=False).mean()))
-        df["Log_Precio_EMA_200"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: np.log(x / x.ewm(span=200, adjust=False).mean()))
-
-        # Resamplear al último valor de cada semana
-        daily_feature_cols = [
-            "RSI_14", "MACD",
-            "Log_Precio_SMA_50", "Log_Precio_SMA_200",
-            "Log_Precio_EMA_50", "Log_Precio_EMA_200"
-        ]
-
-        weekly = (
-            df.groupby("Ticker")[["Fecha"] + daily_feature_cols]
-            .apply(lambda g: g.set_index("Fecha").resample("W-WED").last())
-            .reset_index()
-        )
-
-        return weekly

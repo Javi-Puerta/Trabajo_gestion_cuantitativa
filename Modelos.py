@@ -21,7 +21,7 @@ class ModeloBase(ABC):
 
 
 class RandomForestModel(ModeloBase):
-    def __init__(self, n_estimators: int = 100, max_depth: int = 5,
+    def __init__(self, n_estimators: int = 250, max_depth: int = 4,
                  class_weight: dict = None, random_state: int = 42,
                  positive_class_weight: float = 10.0):
         self.clf = RandomForestClassifier(
@@ -31,11 +31,14 @@ class RandomForestModel(ModeloBase):
             random_state=random_state,
         )
 
-    def train(self, X: pd.DataFrame, y: pd.Series) -> None: self.clf.fit(X, y)
-    def predict_proba(self, X: pd.DataFrame) -> pd.Series: return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
+        self.clf.fit(X, y)
+
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
+        return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)
     
 class XGBoostModel(ModeloBase):
-    def __init__(self, n_estimators: int = 100, max_depth: int = 5,
+    def __init__(self, n_estimators: int = 250, max_depth: int = 4,
                  class_weight: dict = None, random_state: int = 42,
                  positive_class_weight: float = 10.0):
         weights = class_weight or {0: 1, 1: positive_class_weight}
@@ -50,5 +53,8 @@ class XGBoostModel(ModeloBase):
             eval_metric="logloss",
         )
 
-    def train(self, X: pd.DataFrame, y: pd.Series) -> None: self.clf.fit(X, y)
-    def predict_proba(self, X: pd.DataFrame) -> pd.Series: return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
+        self.clf.fit(X, y)
+    
+    def predict_proba(self, X: pd.DataFrame) -> pd.Series:
+        return pd.Series(self.clf.predict_proba(X)[:, 1], index=X.index)

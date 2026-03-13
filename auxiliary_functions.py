@@ -97,3 +97,15 @@ def build_metrics_table(series_dict: dict[str, pd.Series], periods_per_year: int
     Recibe {'Nombre': serie_de_nivel} y devuelve una tabla comparativa de métricas.
     """
     return pd.DataFrame({name: compute_performance_metrics(serie, periods_per_year, rf_annual) for name, serie in series_dict.items()}).T
+
+def _rolling_std(x, window):
+    minp = max(1, window // 2)
+    
+    return x.rolling(window, min_periods=minp).std()
+
+def _clip_by_quantiles(df, col, low_q=0.01, high_q=0.99):
+        low = df.groupby("Ticker")[col].transform(lambda s: s.quantile(low_q))
+        high = df.groupby("Ticker")[col].transform(lambda s: s.quantile(high_q))
+        df[col] = df[col].clip(lower=low, upper=high)
+
+        return None
