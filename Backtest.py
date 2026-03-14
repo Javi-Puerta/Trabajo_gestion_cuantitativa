@@ -10,7 +10,7 @@ from ProveedorDatos import ProveedorDatosBase
 from VariablesTransformation import FeatureEngineer
 from Modelos import ModeloBase
 from Estrategia import EstrategiaBase
-from auxiliary_functions import build_metrics_table
+from auxiliary_functions import build_metrics_table, calcular_costes, mark_to_market
 
 class BacktestEngine:
     def __init__(self, universo: UniversoActivosBase, proveedor: ProveedorDatosBase,
@@ -28,43 +28,17 @@ class BacktestEngine:
         self.VP          = nominal # Valor presente de la cartera
 
         all_tickers = self.universo.get_full_ticker_list()
-        self.costes = self._calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
+        self.costes = calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
         data_start_date = self.start_date - pd.DateOffset(years=self.len_ventana + 1)
         self.df_daily = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
         df_weekly   = proveedor.download_prices_weekly(all_tickers, data_start_date, end_date)
         self.df = self.fe.build(df_weekly, self.df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
-
-    def _calcular_costes(self, tickers: list) -> dict:
-        """
-        Calcula los costes de transacción de comprar/vender cada activo. Estos costes son estáticos
-        para cada activo.
-        """
-        costes = {}
-        for ticker in tickers:
-            costes[ticker] = 0.0005 # 0.05% de coste por operación, por ejemplo
-        return costes
         
     def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
         fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
         train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
         
         return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos)
-    
-    def _mark_to_market(self, cartera: dict, datos_hoy: pd.DataFrame) -> float:
-        '''
-        Calcula el valor de la cartera hoy, dada la cantidad en cash, la cantidad de acciones poseídas
-        de cada ticker y los precios actuales.
-        '''
-        valor_cartera = cartera["cash"]
-        precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
-
-        for ticker, cantidad in cartera.items():
-            if ticker == "cash":
-                continue
-            
-            valor_cartera += cantidad * precios_hoy.get(ticker, np.nan)
-
-        return valor_cartera
 
     def _ajustar_pesos(self, cartera: dict, precios_hoy) -> dict[str, float]:
         pesos = {}
@@ -149,7 +123,7 @@ class BacktestEngine:
 
         for fecha_hoy in fechas_diarias:
             datos_hoy = self.df_daily[self.df_daily["Fecha"] == fecha_hoy].copy()
-            self.VP = self._mark_to_market(cartera, datos_hoy)
+            self.VP = mark_to_market(cartera, datos_hoy)
             historial_neto[fecha_hoy] = self.VP
 
             if fecha_hoy in fechas[:-1]:

@@ -100,7 +100,7 @@ def build_metrics_table(series_dict: dict[str, pd.Series], periods_per_year: int
 
 def _rolling_std(x, window):
     minp = max(1, window // 2)
-    
+
     return x.rolling(window, min_periods=minp).std()
 
 def _clip_by_quantiles(df, col, low_q=0.01, high_q=0.99):
@@ -109,3 +109,29 @@ def _clip_by_quantiles(df, col, low_q=0.01, high_q=0.99):
         df[col] = df[col].clip(lower=low, upper=high)
 
         return None
+
+def calcular_costes(tickers: list) -> dict:
+    """
+    Calcula los costes de transacción de comprar/vender cada activo. Estos costes son estáticos
+    para cada activo.
+    """
+    costes = {}
+    for ticker in tickers:
+        costes[ticker] = 0.0005 # 0.05% de coste por operación, por ejemplo
+    return costes
+
+def mark_to_market(cartera: dict, datos_hoy: pd.DataFrame) -> float:
+    '''
+    Calcula el valor de la cartera hoy, dada la cantidad en cash, la cantidad de acciones poseídas
+    de cada ticker y los precios actuales.
+    '''
+    valor_cartera = cartera["cash"]
+    precios_hoy = datos_hoy.set_index("Ticker")["Precio_Close"]
+
+    for ticker, cantidad in cartera.items():
+        if ticker == "cash":
+            continue
+        
+        valor_cartera += cantidad * precios_hoy.get(ticker, np.nan)
+
+    return valor_cartera
