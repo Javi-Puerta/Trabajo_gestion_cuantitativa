@@ -13,7 +13,7 @@ class EstrategiaBase(ABC):
     """
 
     @abstractmethod
-    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set) -> bool:
+    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set, df_daily) -> bool:
         """
         Entrena la estrategia con los datos del periodo.
         Devuelve True si el entrenamiento fue exitoso, False si no hay datos suficientes.
@@ -49,11 +49,11 @@ class EstrategiaMLEquiponderada(EstrategiaBase):
         self.umbral_salida = umbral_salida
         self._cartera_actual: set = set()
 
-    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set) -> bool:
+    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set, df_daily=None) -> bool:
         train_data = df[df["Ticker"].isin(tickers_validos)].copy()
         if train_data.empty:
             return False
-        self.modelo.train(train_data[feature_cols], train_data["Target"])
+        self.modelo.train(train_data, feature_cols)
         return True
 
     def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
@@ -81,6 +81,97 @@ class EstrategiaMLEquiponderada(EstrategiaBase):
 
         peso = 1 / len(nueva_cartera)
         return {t: peso for t in nueva_cartera}
+
+class EstrategiaMLMonteCarlo(EstrategiaBase):
+    """
+    Usa un modelo ML para preseleccionar candidatos y luego optimiza
+    por máximo Sharpe con simulaciones de Monte Carlo.
+
+    Parámetros
+    ----------
+    modelo        : ModeloBase
+    n_activos_obj : número de activos en cartera
+    umbral_salida : buffer de permanencia
+    n_simulaciones: número de carteras aleatorias a simular
+    peso_min      : peso mínimo por activo (default 0.02 = 2%)
+    dias_retorno: ventana para calcular retornos históricos (default 252)
+    """
+
+    def __init__(self, modelo: ModeloBase, n_activos_obj: int, umbral_salida: int,
+                 n_simulaciones: int = 5000, peso_min: float = 0.02, dias_retorno: int = 252):
+        self.modelo         = modelo
+        self.n_activos_obj   = n_activos_obj
+        self.umbral_salida  = umbral_salida
+        self.n_simulaciones = n_simulaciones
+        self.peso_min       = peso_min
+        self.dias_retorno = dias_retorno
+        self._retornos_hist: pd.DataFrame = pd.DataFrame()
+
+    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set,
+            df_daily: pd.DataFrame) -> bool:
+        '''Entrena el modelo y guarda los retornos históricos de los tickers válidos para la
+        optimización posterior por Montecarlo.'''
+        train_data = df[df["Ticker"].isin(tickers_validos)].copy()
+        if train_data.empty:
+            return False
+        self.modelo.train(train_data, feature_cols)
+
+        daily = df_daily[df_daily["Ticker"].isin(tickers_validos)].copy()
+        self._retornos_hist = (
+            daily.pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+            .sort_index().pct_change().tail(self.dias_retorno)
+        )
+        return True
+
+    def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
+                    cartera: dict[str, float]) -> dict[str, float]:
+        datos = df_hoy.copy()
+
+        # 1) Preselección por score ML (con buffer de permanencia)
+        proba = self.modelo.predict_proba(datos[feature_cols])
+        datos["Score"] = proba.values if hasattr(proba, "values") else proba
+        datos = datos.sort_values("Score", ascending=False)
+
+        cartera_actual = set(cartera.keys()) - {"cash"}
+        top = set(datos.head(self.umbral_salida)["Ticker"])
+        mantener = cartera_actual & top
+        huecos = self.n_activos_obj - len(mantener)
+        candidatos_nuevos = [t for t in datos["Ticker"] if t not in mantener]
+        candidatos = list(mantener) + candidatos_nuevos[:huecos]
+
+        # 2) Filtrar retornos históricos a los candidatos disponibles
+        ret = self._retornos_hist.reindex(columns=candidatos).dropna(axis=1, how="all").fillna(0)
+        if ret.shape[1] < 2:
+            # Fallback: equiponderar si no hay datos suficientes
+            peso = 1 / len(candidatos)
+            return {t: peso for t in candidatos}
+
+        tickers_validos_mc = ret.columns.tolist()
+        n = len(tickers_validos_mc)
+        media = ret.mean().values
+        cov   = ret.cov().values
+
+        # 3) Monte Carlo: generamos n_simulaciones carteras aleatorias
+        best_sharpe = -np.inf
+        best_pesos  = np.ones(n) / n
+
+        rng = np.random.default_rng(seed=42)
+        for _ in range(self.n_simulaciones):
+            # Pesos aleatorios con restricción de peso mínimo
+            # Truco: generamos dirichlet y escalamos para respetar peso_min
+            raw = rng.dirichlet(np.ones(n))
+            pesos = self.peso_min + (1 - n * self.peso_min) * raw  # escala al rango [peso_min, 1]
+            pesos = pesos / pesos.sum()  # renormalizar por si acaso
+
+            ret_cartera = float(pesos @ media) * 252
+            vol_cartera = float(np.sqrt(pesos @ cov @ pesos)) * np.sqrt(252)
+            sharpe       = ret_cartera / vol_cartera if vol_cartera > 0 else -np.inf
+
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_pesos  = pesos
+
+        return {t: float(best_pesos[i]) for i, t in enumerate(tickers_validos_mc)}
     
 class EstrategiaMLMinVarAlphaTilt(EstrategiaBase):
     """
@@ -121,13 +212,13 @@ class EstrategiaMLMinVarAlphaTilt(EstrategiaBase):
         self._cov = pd.DataFrame()
         self._trained_tickers = set()
 
-    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set) -> bool:
+    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set, df_daily=None) -> bool:
         train_data = df[df["Ticker"].isin(tickers_validos)].copy()
         if train_data.empty:
             return False
 
         # 1) Entrenamos alpha model
-        self.modelo.train(train_data[feature_cols], train_data["Target"])
+        self.modelo.train(train_data, feature_cols)
 
         # 2) Estimamos covarianza robusta sobre retornos semanales
         ret = (

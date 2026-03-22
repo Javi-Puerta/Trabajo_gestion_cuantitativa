@@ -56,7 +56,7 @@ class MotorInversion:
         fecha_corte = df["Fecha"].max() - pd.Timedelta(weeks=2)
         df_train = df[df["Fecha"] <= fecha_corte]
         tickers = list(self.universo.get_universe_at_date(fecha))
-        self.estrategia.train(df_train, self.fe.feature_cols, tickers)
+        self.estrategia.train(df_train, self.fe.feature_cols, set(tickers))
         self._ultimo_train = fecha_corte.date()
         (self.path / self.TRAIN_DATE_FILE).write_text(self._ultimo_train.isoformat())
 
@@ -78,7 +78,7 @@ class MotorInversion:
         tickers_validos = self.universo.get_universe_at_date(fecha)
         df_hoy = df[(df["Fecha"] == fecha) & (df["Ticker"].isin(tickers_validos))]
         pesos_obj = self.estrategia.seleccionar(df_hoy, self.fe.feature_cols, self.cartera)
-        precios = df_hoy.set_index("Ticker")["Precio_Close"].to_dict()
+        precios = df_daily[df_daily["Fecha"] == fecha].set_index("Ticker")["Precio_Close"].to_dict()
 
         actuales = set(self.cartera.keys()) - {"cash"}
         objetivo = set(pesos_obj.keys())

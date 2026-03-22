@@ -36,9 +36,10 @@ class BacktestEngine:
         
     def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
         fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
-        train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
-        
-        return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos)
+        train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] < fecha_pivote)]
+        train_daily = self.df_daily[(self.df_daily["Fecha"] >= fecha_inicio) & (self.df_daily["Fecha"] < fecha_pivote)]
+
+        return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos, train_daily)
 
     def _ajustar_pesos(self, cartera: dict, precios_hoy) -> dict[str, float]:
         pesos = {}
