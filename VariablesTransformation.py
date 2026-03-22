@@ -47,7 +47,7 @@ class FeatureEngineer:
 
         weekly = (
             df.groupby("Ticker")[["Fecha"] + daily_feature_cols]
-            .apply(lambda g: g.set_index("Fecha").resample("W-WED").last())
+            .apply(lambda g: g.set_index("Fecha").resample("W-FRI").last())
             .reset_index()
         )
 
