@@ -35,7 +35,8 @@ class RandomForestModel(ModeloBase):
         self.clf = RandomForestClassifier(random_state=random_state)
         self.param_grid = {
             "n_estimators": [150, 250, 400], "max_depth": [3, 6],
-            "min_samples_leaf": [0.01, 0.05], "max_features": [None, "sqrt", 0.8]
+            "min_samples_leaf": [0.01, 0.05], "max_features": ["sqrt", 0.8],
+            "class_weight": [{0:1, 1:3}, {0:1, 1:5}]
         }
     
 class XGBoostModel(ModeloBase):

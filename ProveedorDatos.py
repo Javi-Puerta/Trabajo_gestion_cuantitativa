@@ -68,11 +68,15 @@ class YFinanceProvider(ProveedorDatosBase):
         df_daily = self.download_prices_daily(tickers, start_buffered, end_date)
         df_daily["Fecha"] = pd.to_datetime(df_daily["Fecha"])
 
-        weekly = df_daily.set_index("Fecha").groupby("Ticker").resample("W-FRI")
-        weekly = weekly.agg(
-            Precio_Close=("Precio_Close", "last"),
-            Volumen_USD=("Volumen_USD", "sum"),
-            include_groups=False
+        weekly = (
+            df_daily[["Fecha", "Ticker", "Precio_Close", "Volumen_USD"]]
+            .set_index("Fecha")
+            .groupby("Ticker")[["Precio_Close", "Volumen_USD"]]
+            .resample("W-FRI")
+            .agg(
+                Precio_Close=("Precio_Close", "last"),
+                Volumen_USD=("Volumen_USD", "sum"),
+            )
         )
 
         weekly["Precio_Close"] = weekly.groupby("Ticker")["Precio_Close"].ffill()
