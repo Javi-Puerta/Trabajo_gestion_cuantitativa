@@ -12,13 +12,14 @@ class EstrategiaBase(ABC):
     Responsabilidad: decidir qué tickers comprar y con qué peso.
     """
 
-    @abstractmethod
     def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set, df_daily) -> bool:
-        """
-        Entrena la estrategia con los datos del periodo.
-        Devuelve True si el entrenamiento fue exitoso, False si no hay datos suficientes.
-        """
-        ...
+        '''Entrena el modelo y guarda los retornos históricos de los tickers válidos para la
+        optimización posterior por Montecarlo.'''
+        train_data = df[df["Ticker"].isin(tickers_validos)].copy()
+        if train_data.empty:
+            return False
+        self.modelo.train(train_data, feature_cols)
+        return True
 
     @abstractmethod
     def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
@@ -49,85 +50,42 @@ class EstrategiaMLEquiponderada(EstrategiaBase):
         self.umbral_salida = umbral_salida
         self._cartera_actual: set = set()
 
-    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set, df_daily=None) -> bool:
-        train_data = df[df["Ticker"].isin(tickers_validos)].copy()
-        if train_data.empty:
-            return False
-        self.modelo.train(train_data, feature_cols)
-        return True
-
     def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
-                    cartera: dict[str, float]) -> dict[str, float]:
+                    cartera: dict[str, float], df_daily=None) -> dict[str, float]:
         datos = df_hoy.copy()
 
         proba = self.modelo.predict_proba(datos[feature_cols])
         datos["Score"] = proba[:, 1] if getattr(proba, "ndim", 1) > 1 else proba
         datos = datos.sort_values("Score", ascending=False)
 
-        # Posiciones actuales (ignorando cash)
         cartera_actual = set(cartera.keys()) - {"cash"}
+        top = set(datos.head(self.umbral_salida)["Ticker"])
+        mantener = cartera_actual & top
+        huecos = self.n_activos_obj - len(mantener)
+        candidatos_nuevos = [t for t in datos["Ticker"] if t not in mantener]
+        candidatos = list(mantener) + candidatos_nuevos[:huecos]
 
-        tickers_hoy = set(datos["Ticker"])
-        mantener_base = cartera_actual & tickers_hoy  # elimina delisted automáticamente
-
-        if not mantener_base:
-            nueva_cartera = set(datos.head(self.n_activos_obj)["Ticker"])
-        else:
-            top_mant = set(datos.head(self.umbral_salida)["Ticker"])
-            mantener = mantener_base & top_mant
-            huecos = self.n_activos_obj - len(mantener)
-            candidatos = [t for t in datos["Ticker"] if t not in mantener]
-            nueva_cartera = mantener | set(candidatos[:huecos])
-
-        peso = 1 / len(nueva_cartera)
-        return {t: peso for t in nueva_cartera}
+        peso = 1 / len(candidatos)
+        return {t: peso for t in candidatos}
 
 class EstrategiaMLMonteCarlo(EstrategiaBase):
-    """
-    Usa un modelo ML para preseleccionar candidatos y luego optimiza
-    por máximo Sharpe con simulaciones de Monte Carlo.
+    '''Usa un modelo de ML para preseleccionar candidatos y luego optimiza los pesos utilizando simulaciones
+    de Montecarlo, eligiendo la cartera con mayor sharpe.'''
 
-    Parámetros
-    ----------
-    modelo        : ModeloBase
-    n_activos_obj : número de activos en cartera
-    umbral_salida : buffer de permanencia
-    n_simulaciones: número de carteras aleatorias a simular
-    peso_min      : peso mínimo por activo (default 0.02 = 2%)
-    dias_retorno: ventana para calcular retornos históricos (default 252)
-    """
-
-    def __init__(self, modelo: ModeloBase, n_activos_obj: int, umbral_salida: int,
+    def __init__(self, modelo: ModeloBase, n_activos_obj: int, umbral_salida: int, peso_max = 0.2,
                  n_simulaciones: int = 5000, peso_min: float = 0.02, dias_retorno: int = 252):
         self.modelo         = modelo
         self.n_activos_obj   = n_activos_obj
         self.umbral_salida  = umbral_salida
         self.n_simulaciones = n_simulaciones
         self.peso_min       = peso_min
+        self.peso_max       = peso_max
         self.dias_retorno = dias_retorno
-        self._retornos_hist: pd.DataFrame = pd.DataFrame()
+        self._retornos_hist: pd.DataFrame = pd.DataFrame()        
 
-    def train(self, df: pd.DataFrame, feature_cols: list[str], tickers_validos: set,
-            df_daily: pd.DataFrame) -> bool:
-        '''Entrena el modelo y guarda los retornos históricos de los tickers válidos para la
-        optimización posterior por Montecarlo.'''
-        train_data = df[df["Ticker"].isin(tickers_validos)].copy()
-        if train_data.empty:
-            return False
-        self.modelo.train(train_data, feature_cols)
-
-        daily = df_daily[df_daily["Ticker"].isin(tickers_validos)].copy()
-        self._retornos_hist = (
-            daily.pivot(index="Fecha", columns="Ticker", values="Precio_Close")
-            .sort_index().pct_change().tail(self.dias_retorno)
-        )
-        return True
-
-    def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str],
-                    cartera: dict[str, float]) -> dict[str, float]:
+    def seleccionar(self, df_hoy, feature_cols, cartera, df_daily=None):
         datos = df_hoy.copy()
 
-        # 1) Preselección por score ML (con buffer de permanencia)
         proba = self.modelo.predict_proba(datos[feature_cols])
         datos["Score"] = proba.values if hasattr(proba, "values") else proba
         datos = datos.sort_values("Score", ascending=False)
@@ -139,39 +97,90 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
         candidatos_nuevos = [t for t in datos["Ticker"] if t not in mantener]
         candidatos = list(mantener) + candidatos_nuevos[:huecos]
 
-        # 2) Filtrar retornos históricos a los candidatos disponibles
-        ret = self._retornos_hist.reindex(columns=candidatos).dropna(axis=1, how="all").fillna(0)
+        # Retornos diarios actualizados a hoy
+        fecha_hoy = pd.Timestamp(datos["Fecha"].iloc[0])
+        ret = (
+            df_daily[df_daily["Ticker"].isin(candidatos)]
+            .pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+            .sort_index().loc[:fecha_hoy]
+            .tail(self.dias_retorno).pct_change()
+            .dropna(axis=1, how="all").fillna(0)
+        )
+
         if ret.shape[1] < 2:
-            # Fallback: equiponderar si no hay datos suficientes
             peso = 1 / len(candidatos)
             return {t: peso for t in candidatos}
 
-        tickers_validos_mc = ret.columns.tolist()
-        n = len(tickers_validos_mc)
+        tickers_mc = ret.columns.tolist()
+        n     = len(tickers_mc)
         media = ret.mean().values
         cov   = ret.cov().values
 
-        # 3) Monte Carlo: generamos n_simulaciones carteras aleatorias
-        best_sharpe = -np.inf
-        best_pesos  = np.ones(n) / n
-
-        rng = np.random.default_rng(seed=42)
+        best_sharpe, best_pesos = -np.inf, np.ones(n) / n
+        rng = np.random.default_rng(seed=None)
         for _ in range(self.n_simulaciones):
-            # Pesos aleatorios con restricción de peso mínimo
-            # Truco: generamos dirichlet y escalamos para respetar peso_min
-            raw = rng.dirichlet(np.ones(n))
-            pesos = self.peso_min + (1 - n * self.peso_min) * raw  # escala al rango [peso_min, 1]
-            pesos = pesos / pesos.sum()  # renormalizar por si acaso
-
-            ret_cartera = float(pesos @ media) * 252
-            vol_cartera = float(np.sqrt(pesos @ cov @ pesos)) * np.sqrt(252)
-            sharpe       = ret_cartera / vol_cartera if vol_cartera > 0 else -np.inf
-
+            raw   = rng.dirichlet(np.ones(n))
+            pesos = self.peso_min + (1 - n * self.peso_min) * raw
+            pesos = np.clip(pesos, self.peso_min, self.peso_max)  # ← clip directo
+            pesos = pesos / pesos.sum()                           # ← renormalizar
+            ret_c  = float(pesos @ media) * 252
+            vol_c  = float(np.sqrt(pesos @ cov @ pesos)) * np.sqrt(252)
+            sharpe = ret_c / vol_c if vol_c > 0 else -np.inf
             if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_pesos  = pesos
+                best_sharpe, best_pesos = sharpe, pesos
 
-        return {t: float(best_pesos[i]) for i, t in enumerate(tickers_validos_mc)}
+        return {t: float(best_pesos[i]) for i, t in enumerate(tickers_mc)}
+
+import yfinance as yf
+
+class EstrategiaMLEquiponderadaMacro(EstrategiaMLEquiponderada):
+    """
+    Igual que EstrategiaMLEquiponderada pero reduce la exposición a renta variable
+    al 50% cuando las condiciones macro son desfavorables.
+
+    Parámetros
+    ----------
+    ticker_macro   : ticker del indicador macro (default "^VIX")
+    umbral_macro   : valor por encima del cual se reduce exposición (default 25)
+    exposicion_rv  : fracción invertida en RV cuando la señal se activa (default 0.5)
+    """
+
+    def __init__(self, modelo, n_activos_obj, umbral_salida,
+                 ticker_macro="^VIX", umbral_macro=25.0, exposicion_rv=0.5):
+        super().__init__(modelo, n_activos_obj, umbral_salida)
+        self.ticker_macro  = ticker_macro
+        self.umbral_macro  = umbral_macro
+        self.exposicion_rv = exposicion_rv
+        self._cache_macro: pd.Series = pd.Series(dtype=float)  # cache para no descargar cada semana
+
+    def _cargar_macro(self, fecha_hoy: pd.Timestamp):
+        """Descarga el indicador macro si no está en cache o está desactualizado."""
+        if self._cache_macro.empty or self._cache_macro.index[-1] < fecha_hoy:
+            start = (fecha_hoy - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+            end   = (fecha_hoy + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
+            data  = yf.download(self.ticker_macro, start=start, end=end,
+                                progress=False, auto_adjust=True)
+            if not data.empty:
+                self._cache_macro = data["Close"].squeeze()
+
+    def _señal_riesgo(self, fecha_hoy: pd.Timestamp) -> bool:
+        """Devuelve True si hay señal de riesgo elevado."""
+        self._cargar_macro(fecha_hoy)
+        if self._cache_macro.empty:
+            return False
+        valor = self._cache_macro.asof(fecha_hoy)
+        return pd.notna(valor) and float(valor) > self.umbral_macro
+
+    def seleccionar(self, df_hoy, feature_cols, cartera, df_daily=None):
+        pesos = super().seleccionar(df_hoy, feature_cols, cartera, df_daily)
+
+        fecha_hoy = pd.Timestamp(df_hoy["Fecha"].iloc[0])
+        if self._señal_riesgo(fecha_hoy):
+            # Reducir exposición — escalar todos los pesos por exposicion_rv
+            pesos = {t: p * self.exposicion_rv for t, p in pesos.items()}
+            # El resto queda implícitamente en cash (los pesos no suman 1)
+
+        return pesos
     
 class EstrategiaMLMinVarAlphaTilt(EstrategiaBase):
     """
@@ -307,7 +316,7 @@ class EstrategiaMLMinVarAlphaTilt(EstrategiaBase):
         w = w / s
         return w
 
-    def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str], cartera: dict[str, float]) -> dict[str, float]:
+    def seleccionar(self, df_hoy: pd.DataFrame, feature_cols: list[str], cartera: dict[str, float], df_daily= None) -> dict[str, float]:
         datos = df_hoy.copy()
         if datos.empty:
             return {}
