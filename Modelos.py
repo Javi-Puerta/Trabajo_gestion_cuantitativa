@@ -44,10 +44,12 @@ class XGBoostModel(ModeloBase):
         self.n_splits = n_splits
         self.clf = XGBClassifier(random_state=random_state)
         self.param_grid = {
-            "n_estimators":  [150, 250, 400],
-            "max_depth":     [3, 6],
-            "learning_rate": [0.05, 0.1],
-            "subsample":     [0.7, 1.0],
+            "n_estimators":     [150, 250, 400],
+            "max_depth":        [3, 6],
+            "learning_rate":    [0.05, 0.1],
+            "subsample":        [0.7, 1.0],
+            "colsample_bytree": [0.7, 1.0],   # ← fracción de features por árbol, equivalente a max_features en RF
+            "scale_pos_weight": [3, 5, 10],   # ← equivalente a class_weight en RF, importante con clases desbalanceadas
         }
 
 class WalkForwardCV(BaseCrossValidator):
