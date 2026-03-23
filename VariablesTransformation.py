@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
 
-from auxiliary_functions import calculate_rsi, calculate_macd, _rolling_std
+
+from auxiliary_functions import calculate_rsi, calculate_macd, calculate_beta, calculate_bollinger, _rolling_std
 
 class FeatureEngineer:
     """
@@ -103,6 +104,25 @@ class FeatureEngineer:
         df["Retorno_t1"] = df.groupby("Ticker")["Retorno_1W"].shift(1)
         df["Retorno_t2"] = df.groupby("Ticker")["Retorno_1W"].shift(2)
 
+        
+        # Ratio 52w High
+        roll_max_52w = df.groupby("Ticker")["Precio_Close"].transform(lambda x: x.rolling(52, min_periods=26).max())
+        df["Ratio_52w_High"] = df["Precio_Close"] / roll_max_52w
+
+        # Beta 12M vs índice
+        ret_indice_series = df[df["Ticker"] == self.ticker_indice].set_index("Fecha")["Retorno_1W"]
+        df["Retorno_1W_indice"] = df["Fecha"].map(ret_indice_series)
+        df["Beta_12M"] = df.groupby("Ticker")["Retorno_1W"].transform(
+            lambda x: calculate_beta(x, df.loc[x.index, "Retorno_1W_indice"], period=52)
+        )
+        df = df.drop(columns=["Retorno_1W_indice"])
+
+        # Bollinger (log precio respecto a cada banda)
+        df["Log_Precio_Boll_Upper"] = df.groupby("Ticker")["Precio_Close"].transform(
+            lambda x: np.log(x / calculate_bollinger(x, period=20)[0]))
+        df["Log_Precio_Boll_Lower"] = df.groupby("Ticker")["Precio_Close"].transform(
+            lambda x: np.log(x / calculate_bollinger(x, period=20)[1]))
+
         # Target: el retorno la semana siguiente. Luego se convertirá a clasificación según el criterio elegido.
         df["Retorno_Next_Week"] = df.groupby("Ticker")["Retorno_1W"].shift(-1)
         if self.criterio == "mediana":
@@ -111,16 +131,6 @@ class FeatureEngineer:
         else:
             rank = df.groupby("Fecha")["Retorno_Next_Week"].rank(method="first", ascending=False)
             df["Target"] = (rank <= self.criterio).astype(int)
-
-        # ----------------------------------------------------------------
-        # Winsorize / clip de columnas problemáticas (por ticker)
-        # ----------------------------------------------------------------
-        for c in ["Momentum_1M", "Momentum_6M", "Mom_12m_ex_1m", "Volatilidad_1M", "Vol_ratio_1m_6m", "DD_6m", "VolumenUSD_z_20", "Turnover_20w"]:
-            if c in df.columns:
-                try:
-                    self._clip_by_quantiles(df, c, 0.01, 0.99)
-                except Exception:
-                    pass
 
         # ----------------------------------------------------------------
         # Features finales (conjunto reducido y balanceado)
@@ -133,7 +143,9 @@ class FeatureEngineer:
             "Retorno_t1", "Retorno_t2",
             "RSI_14", "MACD",
             "Log_Precio_SMA_50", "Log_Precio_SMA_200",
-            "Log_Precio_EMA_50", "Log_Precio_EMA_200"
+            "Log_Precio_EMA_50", "Log_Precio_EMA_200",
+            "Ratio_52w_High", "Beta_12M",
+            "Log_Precio_Boll_Upper", "Log_Precio_Boll_Lower",
         ]
 
         # 1) Imputación por mediana por ticker para conservar filas

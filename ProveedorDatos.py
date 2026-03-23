@@ -52,8 +52,8 @@ class YFinanceProvider(ProveedorDatosBase):
         df = df.set_index(["Fecha", "Ticker"]).reindex(idx_completo)
         
         # Forward fill y BACKWARD fill para asegurar que todos tengan precio desde el día 1
-        df["Precio_Close"] = df.groupby("Ticker")["Precio_Close"].ffill().bfill()
-        df["Volumen_USD"] = df.groupby("Ticker")["Volumen_USD"].ffill().bfill()
+        df["Precio_Close"] = df.groupby("Ticker")["Precio_Close"].ffill()
+        df["Volumen_USD"] = df.groupby("Ticker")["Volumen_USD"].ffill()
         
         df = df.reset_index()
         df = df.dropna(subset=["Precio_Close"])
@@ -68,10 +68,15 @@ class YFinanceProvider(ProveedorDatosBase):
         df_daily = self.download_prices_daily(tickers, start_buffered, end_date)
         df_daily["Fecha"] = pd.to_datetime(df_daily["Fecha"])
 
-        weekly = df_daily.set_index("Fecha").groupby("Ticker").resample("W-FRI")
-        weekly = weekly.agg(
-            Precio_Close=("Precio_Close", "last"),
-            Volumen_USD=("Volumen_USD", "sum")
+        weekly = (
+            df_daily[["Fecha", "Ticker", "Precio_Close", "Volumen_USD"]]
+            .set_index("Fecha")
+            .groupby("Ticker")[["Precio_Close", "Volumen_USD"]]
+            .resample("W-FRI")
+            .agg(
+                Precio_Close=("Precio_Close", "last"),
+                Volumen_USD=("Volumen_USD", "sum"),
+            )
         )
 
         weekly["Precio_Close"] = weekly.groupby("Ticker")["Precio_Close"].ffill()

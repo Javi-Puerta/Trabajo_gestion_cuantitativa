@@ -21,11 +21,16 @@ class BacktestEngine:
         self.proveedor   = proveedor
         self.estrategia  = estrategia
         self.fe          = feature_engineer
-        self.start_date  = pd.Timestamp(start_date)
         self.end_date    = pd.Timestamp(end_date)
         self.len_ventana = len_ventana
         self.posicion    = {} # diccionario ticker -> cantidad de acciones, actualizado cada fecha
         self.VP          = nominal # Valor presente de la cartera
+
+        # Esto es para asegurarnos de que el backtest empieza un viernes
+        self.start_date = pd.Timestamp(start_date)
+        dias_hasta_viernes = (4 - self.start_date.weekday()) % 7  # 4 = viernes
+        if dias_hasta_viernes > 0:
+            self.start_date += pd.DateOffset(days=dias_hasta_viernes)
 
         all_tickers = self.universo.get_full_ticker_list()
         self.costes = calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
@@ -36,9 +41,10 @@ class BacktestEngine:
         
     def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
         fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
-        train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] <  fecha_pivote)]
-        
-        return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos)
+        train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] < fecha_pivote)]
+        train_daily = self.df_daily[(self.df_daily["Fecha"] >= fecha_inicio) & (self.df_daily["Fecha"] < fecha_pivote)]
+
+        return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos, train_daily)
 
     def _ajustar_pesos(self, cartera: dict, precios_hoy) -> dict[str, float]:
         pesos = {}
@@ -119,7 +125,6 @@ class BacktestEngine:
         ultima_fecha_train = None
         modelo_entrenado = False
         cartera = {"cash": self.VP} # Empezamos 100% en cash
-        pesos = {"cash": 1.0}
 
         for fecha_hoy in fechas_diarias:
             datos_hoy = self.df_daily[self.df_daily["Fecha"] == fecha_hoy].copy()
@@ -143,7 +148,8 @@ class BacktestEngine:
 
                 # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
                 datos_features_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
-                pesos_nuevos = self.estrategia.seleccionar(datos_features_hoy, self.fe.feature_cols, cartera)
+                pesos_nuevos = self.estrategia.seleccionar(datos_features_hoy, self.fe.feature_cols, cartera, self.df_daily)
+                print(f"{fecha_hoy.date()} | VP={self.VP:.0f} | pesos={pesos_nuevos}")
                 cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos_nuevos)
                 
                 historial_neto[fecha_hoy] = self.VP
@@ -169,8 +175,9 @@ class BacktestEngine:
             df_bmk = self.proveedor.download_prices_daily(bmk, self.start_date.strftime("%Y-%m-%d"),
                                                     self.end_date.strftime("%Y-%m-%d"))
             df_bmk["Fecha"] = pd.to_datetime(df_bmk["Fecha"])
+            primera_inversion = serie_estrategia[serie_estrategia != serie_estrategia.iloc[0]].index[0]
             serie_bmk = df_bmk.set_index("Fecha")["Precio_Close"].reindex(fechas).ffill()
-            serie_bmk = serie_bmk / serie_bmk.iloc[0]
+            serie_bmk = serie_bmk / serie_bmk.loc[primera_inversion]
             series_comp[bmk] = serie_bmk
             if plot:
                 plt.plot(fechas, serie_bmk, label=bmk, linestyle="--")
