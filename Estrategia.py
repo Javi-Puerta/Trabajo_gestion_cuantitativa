@@ -144,18 +144,15 @@ class EstrategiaMLEquiponderadaMacro(EstrategiaMLEquiponderada):
         self.ticker_hedge  = ticker_hedge
 
     def _señal_riesgo(self, fecha_hoy: pd.Timestamp, df_daily: pd.DataFrame) -> bool:
-        ret_indice = (
+        precios = (
             df_daily[df_daily["Ticker"] == self.ticker_indice]
             .set_index("Fecha")["Precio_Close"]
             .sort_index()
-            .pct_change()
             .loc[:fecha_hoy]
-            .tail(20)  # últimas 4 semanas de datos diarios
         )
-        if len(ret_indice) < 10:
+        if len(precios) < 200:
             return False
-        vol_realizada = ret_indice.std() * np.sqrt(252)
-        return float(vol_realizada) > self.umbral_vol
+        return float(precios.iloc[-1]) < float(precios.rolling(200).mean().iloc[-1])
 
     def seleccionar(self, df_hoy, feature_cols, cartera, df_daily=None):
         pesos = super().seleccionar(df_hoy, feature_cols, cartera, df_daily)
