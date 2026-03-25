@@ -134,23 +134,14 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
 import yfinance as yf
 
 class EstrategiaMLEquiponderadaMacro(EstrategiaMLEquiponderada):
-    """
-    Igual que EstrategiaMLEquiponderada pero reduce la exposición a renta variable
-    al 50% cuando las condiciones macro son desfavorables.
-
-    Parámetros
-    ----------
-    ticker_macro   : ticker del indicador macro (default "^VIX")
-    umbral_macro   : valor por encima del cual se reduce exposición (default 25)
-    exposicion_rv  : fracción invertida en RV cuando la señal se activa (default 0.5)
-    """
-
     def __init__(self, modelo, n_activos_obj, umbral_salida,
-                 ticker_indice="^STOXX50E", umbral_vol=0.20, exposicion_rv=0.5):
+                 ticker_indice="^STOXX50E", umbral_vol=0.20,
+                 exposicion_rv=0.5, ticker_hedge="4GLD.DE"):  # ← añadir hedge
         super().__init__(modelo, n_activos_obj, umbral_salida)
         self.ticker_indice = ticker_indice
         self.umbral_vol    = umbral_vol
         self.exposicion_rv = exposicion_rv
+        self.ticker_hedge  = ticker_hedge
 
     def _señal_riesgo(self, fecha_hoy: pd.Timestamp, df_daily: pd.DataFrame) -> bool:
         ret_indice = (
@@ -172,7 +163,9 @@ class EstrategiaMLEquiponderadaMacro(EstrategiaMLEquiponderada):
         if df_daily is not None:
             fecha_hoy = pd.Timestamp(df_hoy["Fecha"].iloc[0])
             if self._señal_riesgo(fecha_hoy, df_daily):
+                peso_hedge = 1 - self.exposicion_rv
                 pesos = {t: p * self.exposicion_rv for t, p in pesos.items()}
+                pesos[self.ticker_hedge] = peso_hedge
 
         return pesos
     
