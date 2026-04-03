@@ -56,7 +56,7 @@ class MotorInversion:
         fecha_corte = df["Fecha"].max() - pd.Timedelta(weeks=2)
         df_train = df[df["Fecha"] <= fecha_corte]
         tickers = list(self.universo.get_universe_at_date(fecha))
-        self.estrategia.train(df_train, self.fe.feature_cols, set(tickers))
+        self.estrategia.train(df_train, self.fe.feature_cols, set(tickers), df_daily)
         self._ultimo_train = fecha_corte.date()
         (self.path / self.TRAIN_DATE_FILE).write_text(self._ultimo_train.isoformat())
 
@@ -77,13 +77,15 @@ class MotorInversion:
         df = self.fe.build(df_weekly, df_daily)
         tickers_validos = self.universo.get_universe_at_date(fecha)
         df_hoy = df[(df["Fecha"] == fecha) & (df["Ticker"].isin(tickers_validos))]
-        pesos_obj = self.estrategia.seleccionar(df_hoy, self.fe.feature_cols, self.cartera)
+        pesos_obj = self.estrategia.seleccionar(df_hoy, self.fe.feature_cols, self.cartera, df_daily)
+        print(f"[Señales] {fecha.date()} | Pesos objetivo: {pesos_obj}")
         precios = df_daily[df_daily["Fecha"] == fecha].set_index("Ticker")["Precio_Close"].to_dict()
 
         actuales = set(self.cartera.keys()) - {"cash"}
         objetivo = set(pesos_obj.keys())
         filas = []
         vp = mark_to_market(self.cartera, df_hoy)
+        print(f"Valor de la cartera antes de ejecutar señales: {vp:.2f}€")
 
         # Ventas
         for ticker in actuales - objetivo:
