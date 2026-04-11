@@ -1,5 +1,6 @@
 import pandas as pd
 import yfinance as yf
+from IPython.display import display
 
 def cartera(fecha, df):
     '''Devuelve un diccionario con los componentes de la cartera en una fecha dada.'''
@@ -89,39 +90,65 @@ def rentabilidad_semanal_por_periodo(df, capital_inicial=10000000):
     return pd.DataFrame(resultados).set_index("Periodo")
 
 def resultados_semana(fecha_ini, fecha_fin, df, universo_tickers):
-    '''Para una semana dada, muestra el rendimiento de los activos elegidos y su ranking en el universo.'''
-    todos_tickers = universo_tickers
-    
-    precios = yf.download(todos_tickers, start=fecha_ini - pd.Timedelta(days=7), 
+    precios = yf.download(universo_tickers, start=fecha_ini - pd.Timedelta(days=7),
                           end=fecha_fin + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"].ffill()
+    stoxx = yf.download("^STOXX50E", start=fecha_ini - pd.Timedelta(days=7),
+                        end=fecha_fin + pd.Timedelta(days=1), auto_adjust=True, progress=False)["Close"].squeeze().ffill()
 
-    # Rentabilidad de todos los activos del universo
-    ret_universo = {}
-    for t in todos_tickers:
-        if t in precios.columns:
-            ret_universo[t] = precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
-    ret_universo = pd.Series(ret_universo).sort_values(ascending=False)
+    ret_universo = pd.Series({
+        t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
+        for t in universo_tickers if t in precios.columns
+    }).sort_values(ascending=False)
     ranking = ret_universo.rank(ascending=False).astype(int)
+    ret_top15 = ret_universo.iloc[14]
+    ret_stoxx = stoxx.asof(fecha_fin) / stoxx.asof(fecha_ini) - 1
 
-    # Activos elegidos en fecha_ini
-    elegidos = cartera(fecha_ini, df)
+    cartera_ini = cartera(fecha_ini, df)
+    valor_total = sum(cartera_ini[t] * precios[t].asof(fecha_ini) for t in cartera_ini if t in precios.columns)
 
     resultados = []
-    for t, cantidad in elegidos.items():
+    for t, cantidad in cartera_ini.items():
         if t not in ret_universo:
             continue
+        precio_ini = precios[t].asof(fecha_ini)
+        precio_fin = precios[t].asof(fecha_fin)
+        peso = (cantidad * precio_ini) / valor_total
+        retorno = ret_universo[t]
         resultados.append({
             "Ticker": t,
-            "Retorno": ret_universo[t],
+            "Peso": peso,
+            "Retorno": retorno,
+            "P&L (€)": cantidad * (precio_fin - precio_ini),
             "Ranking": ranking[t],
+            "Diff vs Top15": retorno - ret_top15,
             "Top 15?": "✓" if ranking[t] <= 15 else "✗"
         })
 
     df_resultado = pd.DataFrame(resultados).set_index("Ticker").sort_values("Ranking")
-    
-    # Hit rate
-    hit_rate = (df_resultado["Top 15?"] == "✓").mean()
-    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()}")
-    print(f"Hit rate: {hit_rate:.0%} ({(df_resultado['Top 15?'] == '✓').sum()}/15 en top 15)\n")
-    
+
+    # Fila agregada
+    ret_cartera = (df_resultado["Peso"] * df_resultado["Retorno"]).sum()
+    df_resultado.loc["TOTAL"] = {
+        "Peso": df_resultado["Peso"].sum(),
+        "Retorno": ret_cartera,
+        "P&L (€)": df_resultado["P&L (€)"].sum(),
+        "Ranking": "-",
+        "Diff vs Top15": ret_cartera - ret_top15,
+        "Top 15?": f"Alpha vs BMK: {ret_cartera - ret_stoxx:+.2%}"
+    }
+
+    hit_rate = (df_resultado.iloc[:-1]["Top 15?"] == "✓").mean()
+    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()} | Hit rate: {hit_rate:.0%} ({(df_resultado.iloc[:-1]['Top 15?'] == '✓').sum()}/15 en top 15) | BMK: {ret_stoxx:.2%}")
+
     return df_resultado
+
+
+def resultados_todas_semanas(df, universo_tickers):
+    fechas_op = sorted(df["fecha"].unique())
+    for i in range(len(fechas_op) - 1):
+        tabla = resultados_semana(fechas_op[i], fechas_op[i + 1], df, universo_tickers)
+        display(tabla.style.format({
+            "Peso": "{:.2%}", "Retorno": "{:.2%}", 
+            "P&L": "{:.0f}", "Diff vs Top15": "{:.2%}"
+        }))
+        print()
