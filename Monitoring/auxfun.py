@@ -89,7 +89,8 @@ def rentabilidad_semanal_por_periodo(df, capital_inicial=10000000):
 
     return pd.DataFrame(resultados).set_index("Periodo")
 
-def resultados_semana(fecha_ini, fecha_fin, df, universo_tickers):
+def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers):
+    '''Combina resultados y atribución en una única tabla por semana.'''
     precios = yf.download(universo_tickers, start=fecha_ini - pd.Timedelta(days=7),
                           end=fecha_fin + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"].ffill()
     stoxx = yf.download("^STOXX50E", start=fecha_ini - pd.Timedelta(days=7),
@@ -102,6 +103,8 @@ def resultados_semana(fecha_ini, fecha_fin, df, universo_tickers):
     ranking = ret_universo.rank(ascending=False).astype(int)
     ret_top15 = ret_universo.iloc[14]
     ret_stoxx = stoxx.asof(fecha_fin) / stoxx.asof(fecha_ini) - 1
+    ret_bmk_ew = ret_universo.mean()
+    peso_bmk = 1 / len(ret_universo)
 
     cartera_ini = cartera(fecha_ini, df)
     valor_total = sum(cartera_ini[t] * precios[t].asof(fecha_ini) for t in cartera_ini if t in precios.columns)
@@ -121,12 +124,13 @@ def resultados_semana(fecha_ini, fecha_fin, df, universo_tickers):
             "P&L (€)": cantidad * (precio_fin - precio_ini),
             "Ranking": ranking[t],
             "Diff vs Top15": retorno - ret_top15,
+            "Ef. Selección": peso_bmk * (retorno - ret_bmk_ew),
+            "Ef. Peso": (peso - peso_bmk) * (retorno - ret_bmk_ew),
             "Top 15?": "✓" if ranking[t] <= 15 else "✗"
         })
 
     df_resultado = pd.DataFrame(resultados).set_index("Ticker").sort_values("Ranking")
 
-    # Fila agregada
     ret_cartera = (df_resultado["Peso"] * df_resultado["Retorno"]).sum()
     df_resultado.loc["TOTAL"] = {
         "Peso": df_resultado["Peso"].sum(),
@@ -134,21 +138,58 @@ def resultados_semana(fecha_ini, fecha_fin, df, universo_tickers):
         "P&L (€)": df_resultado["P&L (€)"].sum(),
         "Ranking": "-",
         "Diff vs Top15": ret_cartera - ret_top15,
-        "Top 15?": f"Alpha vs BMK: {ret_cartera - ret_stoxx:+.2%}"
+        "Ef. Selección": df_resultado["Ef. Selección"].sum(),
+        "Ef. Peso": df_resultado["Ef. Peso"].sum(),
+        "Top 15?": f"Alpha vs STOXX: {ret_cartera - ret_stoxx:+.2%}"
     }
 
     hit_rate = (df_resultado.iloc[:-1]["Top 15?"] == "✓").mean()
-    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()} | Hit rate: {hit_rate:.0%} ({(df_resultado.iloc[:-1]['Top 15?'] == '✓').sum()}/15 en top 15) | BMK: {ret_stoxx:.2%}")
-
+    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()} | Ret. Cartera: {ret_cartera:.2%} | Hit rate: {hit_rate:.0%} | BMK STOXX: {ret_stoxx:.2%} | BMK EW: {ret_bmk_ew:.2%}")
     return df_resultado
 
 
-def resultados_todas_semanas(df, universo_tickers):
+def analisis_todas_semanas(df, universo_tickers):
     fechas_op = sorted(df["fecha"].unique())
     for i in range(len(fechas_op) - 1):
-        tabla = resultados_semana(fechas_op[i], fechas_op[i + 1], df, universo_tickers)
+        tabla = analisis_semana(fechas_op[i], fechas_op[i + 1], df, universo_tickers)
         display(tabla.style.format({
-            "Peso": "{:.2%}", "Retorno": "{:.2%}", 
-            "P&L": "{:.0f}", "Diff vs Top15": "{:.2%}"
+            "Peso": "{:.2%}", "Retorno": "{:.2%}", "P&L (€)": "{:,.0f}",
+            "Diff vs Top15": "{:.2%}", "Ef. Selección": "{:.2%}", "Ef. Peso": "{:.2%}"
         }))
+        print()
+        
+def top_bottom_universo(fecha_ini, fecha_fin, df, universo_tickers, n=10):
+    precios = yf.download(universo_tickers, start=fecha_ini - pd.Timedelta(days=7),
+                          end=fecha_fin + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"].ffill()
+
+    ret_universo = pd.Series({
+        t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
+        for t in universo_tickers if t in precios.columns
+    }).sort_values(ascending=False)
+
+    cartera_ini = cartera(fecha_ini, df)
+    valor_total = sum(cartera_ini[t] * precios[t].asof(fecha_ini) for t in cartera_ini if t in precios.columns)
+    pesos = {t: (cartera_ini[t] * precios[t].asof(fecha_ini)) / valor_total for t in cartera_ini if t in precios.columns}
+
+    def construir_tabla(serie):
+        df_t = serie.reset_index()
+        df_t.columns = ["Ticker", "Retorno"]
+        df_t["Elegido?"] = df_t["Ticker"].apply(lambda t: "✓" if t in pesos else "✗")
+        df_t["Peso"] = df_t["Ticker"].apply(lambda t: pesos.get(t, None))
+        return df_t.set_index("Ticker")
+
+    top = construir_tabla(ret_universo.head(n))
+    bottom = construir_tabla(ret_universo.tail(n))
+
+    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()}")
+    print(f"\n🔼 Top {n}")
+    display(top.style.format({"Retorno": "{:.2%}", "Peso": lambda x: f"{x:.2%}" if x is not None else "-"}))
+    print(f"\n🔽 Bottom {n}")
+    display(bottom.style.format({"Retorno": "{:.2%}", "Peso": lambda x: f"{x:.2%}" if x is not None else "-"}))
+
+
+def top_bottom_todas_semanas(df, universo_tickers, n=10):
+    fechas_op = sorted(df["fecha"].unique())
+    for i in range(len(fechas_op) - 1):
+        top_bottom_universo(fechas_op[i], fechas_op[i + 1], df, universo_tickers, n)
         print()
