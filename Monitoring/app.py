@@ -1,327 +1,336 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import numpy as np
+import yfinance as yf
 import plotly.express as px
+import plotly.graph_objects as go
 import time
+from datetime import datetime, timedelta
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Quant Desk Monitor", page_icon="📈", layout="wide")
-REFRESH_RATE = 10 
-RISK_FREE_RATE = 0.03 
-STARTING_NAV = 10_000_000 # The exact Total NAV on March 12, 2026
+# ==========================================
+# CONFIGURATION & CONSTANTS
+# ==========================================
+st.set_page_config(page_title="Prop Trading MTM Engine", layout="wide")
 
-# --- 2. PORTFOLIO STATE RECONSTRUCTION ---
-def reconstruct_portfolio(csv_path):
-    df = pd.read_csv(csv_path)
-    df['fecha'] = pd.to_datetime(df['fecha'], dayfirst=True, format='mixed')
-    inception_date = df['fecha'].min().strftime('%Y-%m-%d')
-    
-    df['Accion'] = df['Accion'].str.strip().str.upper()
-    df['Ticker'] = df['Ticker'].str.strip()
-    df['Qty_Signed'] = np.where(df['Accion'] == 'COMPRA', df['Cantidad'], -df['Cantidad'])
-    
-    total_historical_costs = (df['Cantidad'] * df['CT']).sum()
-    
-    portfolio = {}
-    grouped = df.groupby('Ticker')
-    
-    for ticker, group in grouped:
-        net_qty = group['Qty_Signed'].sum()
-        if net_qty != 0:
-            buys = group[group['Accion'] == 'COMPRA']
-            if not buys.empty and net_qty > 0:
-                vwap_net = (buys['Cantidad'] * buys['Precio_Ejecutado']).sum() / buys['Cantidad'].sum()
-                vwap_gross = (buys['Cantidad'] * buys['Precio']).sum() / buys['Cantidad'].sum()
-            else:
-                vwap_net = group['Precio_Ejecutado'].mean() 
-                vwap_gross = group['Precio'].mean()
-                
-            portfolio[ticker] = {
-                'cantidad': net_qty,
-                'vwap_net': vwap_net,
-                'vwap_gross': vwap_gross
-            }
-            
-    return portfolio, inception_date, total_historical_costs
+INITIAL_CAPITAL = 10000000.0
+RFR_ANNUAL = 0.02
+BENCHMARK_TICKER = "^STOXX50E"
+DATA_PATH = "../mi_cartera/historial_operaciones.csv"
 
-# --- 2.5 TRUE HISTORICAL RETURN VECTOR ---
-def calculate_performance_vectors(csv_path, historical_prices, index_prices, starting_nav):
-    """Calculates daily return vectors for the strategy and index to build a Base 100 chart."""
-    df = pd.read_csv(csv_path)
-    # 1. Read dates with European format
-    df['fecha'] = pd.to_datetime(df['fecha'], dayfirst=True, format='mixed').dt.normalize()
-    
-    df['Accion'] = df['Accion'].str.strip().str.upper()
-    df['Ticker'] = df['Ticker'].str.strip()
-    
-    # 2. Track Cash Flows using Precio_Ejecutado (Price + Costs)
-    df['Cash_Impact'] = np.where(df['Accion'] == 'COMPRA', 
-                                 -df['Cantidad'] * df['Precio_Ejecutado'], 
-                                 df['Cantidad'] * df['Precio_Ejecutado'])
-    df['Qty_Signed'] = np.where(df['Accion'] == 'COMPRA', df['Cantidad'], -df['Cantidad'])
-    
-    daily_trades = df.groupby(['fecha', 'Ticker'])['Qty_Signed'].sum().unstack(fill_value=0)
-    daily_cash = df.groupby('fecha')['Cash_Impact'].sum()
-    
-    all_dates = historical_prices.index.normalize().unique()
-    
-    # 3. Build cumulative running balances
-    positions_history = daily_trades.reindex(all_dates, fill_value=0).cumsum()
-    cash_history = starting_nav + daily_cash.reindex(all_dates, fill_value=0).cumsum()
-    
-    valid_tickers = [t for t in positions_history.columns if t in historical_prices.columns]
-    positions_history = positions_history[valid_tickers]
-    prices_aligned = historical_prices[valid_tickers]
-    
-    # 4. Calculate Absolute Total NAV (Cash + Market Data from YFinance)
-    invested_value = (positions_history * prices_aligned).sum(axis=1)
-    true_nav_history = invested_value + cash_history
-    
-    # 5. GENERATE THE RETURN VECTORS
-    # Calculate the daily percentage change of the True NAV
-    strategy_daily_returns = true_nav_history.pct_change().fillna(0)
-    # Calculate the daily percentage change of the Index
-    index_daily_returns = index_prices.pct_change().fillna(0)
-    
-    # 6. CALCULATE BASE 100
-    strategy_base_100 = 100 * (1 + strategy_daily_returns).cumprod()
-    index_base_100 = 100 * (1 + index_daily_returns).cumprod()
-    
-    return strategy_base_100, index_base_100
-
-# --- 3. STATIC CACHE ---
-@st.cache_data
-def load_historical_data(tickers, start_date):
-    all_symbols = tickers + ['^STOXX50E']
-    raw_data = yf.download(all_symbols, start=start_date, progress=False)
-    
-    if 'Adj Close' in raw_data.columns:
-        hist = raw_data['Adj Close']
-    elif 'Close' in raw_data.columns:
-        hist = raw_data['Close']
-    else:
-        st.error(f"🚨 YFinance could not find the pricing data.")
-        st.stop()
-        
-    returns = hist.pct_change().dropna()
-    valid_tickers = [t for t in tickers if t in returns.columns]
-    
-    cov_matrix = returns[valid_tickers].cov()
-    market_var = returns['^STOXX50E'].var()
-    betas = {t: returns[t].cov(returns['^STOXX50E']) / market_var for t in valid_tickers}
-    
-    return cov_matrix, betas, returns
-
-# --- 4. LIVE DATA FETCHING ---
-def fetch_live_prices(tickers):
-    """Fetches spot prices, with a robust fallback for weekends/closed markets."""
-    # 1. Try to get live 1-minute intraday data
-    raw_data = yf.download(tickers, period="1d", interval="1m", progress=False)
-    
-    # 2. FALLBACK: If the market is closed and 1m data is empty, get the last 5 days of daily data
-    if raw_data.empty:
-        raw_data = yf.download(tickers, period="5d", interval="1d", progress=False)
-        
-    # 3. Extract the correct pricing column
-    if 'Adj Close' in raw_data.columns:
-        data = raw_data['Adj Close']
-    elif 'Close' in raw_data.columns:
-        data = raw_data['Close']
-    else:
-        # Ultimate fallback if Yahoo completely fails
-        return {t: 0 for t in tickers} 
-
-    # 4. Final safety check to prevent the IndexError
-    if data.empty:
-        return {t: 0 for t in tickers}
-
-    # 5. Return the prices
-    if isinstance(data, pd.Series):
-        return {tickers[0]: data.iloc[-1]}
-        
-    # ffill() carries the last traded price forward in case a specific stock is halted
-    return data.ffill().iloc[-1].to_dict()
-
-# --- 5. MAIN DASHBOARD LOOP ---
-def main():
-    st.title("🇪🇺 Eurostoxx50 Quant Monitor")
-    
+# ==========================================
+# DATA INGESTION & ROBUSTNESS
+# ==========================================
+@st.cache_data(ttl=60)
+def load_trade_data():
+    """Loads the Spanish ledger and standardizes headers for the engine."""
     try:
-        positions, inception_date, total_historical_costs = reconstruct_portfolio('../mi_cartera/historial_operaciones.csv') 
+        # 1. Tell pandas to parse the 'fecha' column as dates
+        df = pd.read_csv(DATA_PATH, parse_dates=["fecha"])
+        
+        # 2. Rename 'fecha' to 'Date' so the rest of the MTM engine 
+        #    doesn't need to be rewritten.
+        df = df.rename(columns={"fecha": "Date"})
+        
+        # 3. Sort chronologically
+        df = df.sort_values("Date").reset_index(drop=True)
+        return df
+        
     except FileNotFoundError:
-        st.error("historial_operaciones.csv not found.")
-        st.stop()
-        
-    tickers = list(positions.keys())
-    if not tickers:
-        st.warning("No open positions found in the ledger.")
-        st.stop()
+        st.warning(f"File '{DATA_PATH}' not found. Check the relative path.")
+        # ... (keep the mock data fallback here just in case) ...
+        return pd.DataFrame() # Or keep the mock generation logic
+
+# ==========================================
+# WALK-FORWARD ACCOUNTING ENGINE
+# ==========================================
+@st.cache_data(ttl=60)
+def process_ledger(df):
+    """Iterates chronologically, trusting the CSV strictly for cash flows."""
+    inventory = {}
+    vwap = {}
+    costs_paid = {}
     
-    cov_matrix, asset_betas, historical_returns = load_historical_data(tickers, inception_date)
-    live_prices = fetch_live_prices(tickers)
+    cash_history = []
+    daily_shares = []
     
-    # --- CALCULATE LIVE METRICS ---
-    total_nav = 0
-    total_unrealized_gross = 0
-    total_unrealized_net = 0
-    total_open_costs = 0
-    portfolio_data = []
+    current_cash = INITIAL_CAPITAL
     
-    for ticker, data in positions.items():
-        qty = data['cantidad']
-        vwap_net = data['vwap_net']
-        vwap_gross = data['vwap_gross']
-        spot_price = live_prices.get(ticker, 0)
+    # SORTING FIX: Sort by Date, then by Accion. 
+    # 'COMPRA' comes before 'VENTA' alphabetically, ensuring same-day buys 
+    # are processed before same-day sells, avoiding phantom zero-inventory.
+    df_sorted = df.sort_values(by=["Date", "Accion"]).reset_index(drop=True)
+    
+    dates = sorted(df['Date'].unique())
+    start_date = dates[0]
+    end_date = pd.Timestamp.today().normalize()
+    
+    all_dates = pd.date_range(start=start_date, end=end_date, freq='B')
+    trade_idx = 0
+    
+    for current_date in all_dates:
+        while trade_idx < len(df_sorted) and df_sorted.iloc[trade_idx]['Date'] <= current_date:
+            row = df_sorted.iloc[trade_idx]
+            
+            t = str(row['Ticker']).strip().upper()
+            action = str(row['Accion']).strip().upper()
+            qty = abs(float(row['Cantidad'])) 
+            p = float(row['Precio'])
+            p_exec = float(row['Precio_Ejecutado'])
+            
+            if t not in inventory:
+                inventory[t] = 0
+                vwap[t] = 0.0
+                costs_paid[t] = 0.0
+                
+            if action == "COMPRA":
+                cost = qty * p_exec
+                current_cash -= cost
+                friction = (p_exec - p) * qty
+                costs_paid[t] += friction
+                
+                total_value = (inventory[t] * vwap[t]) + cost
+                inventory[t] += qty
+                vwap[t] = total_value / inventory[t] if inventory[t] > 0 else 0.0
+                
+            elif action == "VENTA":
+                # STRICT TRUST: We no longer cap the sale. 
+                # If the CSV says you sold it, you sold it.
+                revenue = qty * p_exec
+                current_cash += revenue
+                
+                # Friction on sale is clean price minus executed price
+                friction = (p - p_exec) * qty 
+                costs_paid[t] += friction
+                
+                inventory[t] -= qty
+                
+                # Floor inventory to 0 to clean up floating point errors
+                if inventory[t] <= 0.001: 
+                    inventory[t] = 0
+                    vwap[t] = 0.0
+                        
+            trade_idx += 1
+            
+        cash_history.append({"Date": current_date, "Cash": current_cash})
+        for ticker, amount in inventory.items():
+            if amount > 0:
+                daily_shares.append({"Date": current_date, "Ticker": ticker, "Shares": amount, "VWAP": vwap[ticker]})
+
+    return pd.DataFrame(cash_history), pd.DataFrame(daily_shares), inventory, vwap, costs_paid
+
+# ==========================================
+# MARKET DATA & MTM CALCULATION
+# ==========================================
+@st.cache_data(ttl=60)
+def fetch_market_data(tickers, start_date):
+    """Fetches daily closing prices with fallback mechanics."""
+    t_list = list(set(tickers + [BENCHMARK_TICKER]))
+    data = yf.download(t_list, start=start_date, end=pd.Timestamp.today() + timedelta(days=1), progress=False)['Close']
+    data.fillna(method='ffill', inplace=True)
+    return data
+
+def get_live_prices(tickers):
+    """Gets spot prices using 1d/1m with 5d/1d fallback."""
+    spot = {}
+    for t in tickers:
+        try:
+            live = yf.download(t, period="1d", interval="1m", progress=False)['Close']
+            if live.empty:
+                raise ValueError
+            spot[t] = live.iloc[-1].item()
+        except:
+            live = yf.download(t, period="5d", interval="1d", progress=False)['Close']
+            spot[t] = live.iloc[-1].item() if not live.empty else 0.0
+    return spot
+
+# ==========================================
+# UI RENDERING & LOGIC
+# ==========================================
+def main():
+    st.title("🇪🇺 Eurostoxx 50 Walk-Forward MTM Engine")
+    
+    # Auto-Refresh Toggle
+    auto_refresh = st.sidebar.checkbox("Enable 10s Auto-Refresh", value=False)
+    
+    df_trades = load_trade_data()
+    df_cash, df_shares, current_inventory, current_vwap, costs_paid = process_ledger(df_trades)
+    
+    all_tickers = df_shares['Ticker'].unique().tolist() if not df_shares.empty else []
+    start_date = df_cash['Date'].min()
+    
+    market_px = fetch_market_data(all_tickers, start_date)
+    spot_prices = get_live_prices([t for t, q in current_inventory.items() if q > 0])
+    
+    # Build Daily MTM True NAV
+    daily_mtm = []
+    for d in df_cash['Date']:
+        c = df_cash.loc[df_cash['Date'] == d, 'Cash'].values[0]
+        invested = 0.0
         
-        position_value = qty * spot_price
-        cost_basis_net = qty * vwap_net
-        cost_basis_gross = qty * vwap_gross
+        day_shares = df_shares[df_shares['Date'] == d]
+        for _, row in day_shares.iterrows():
+            t = row['Ticker']
+            # Find closest available price on or before date
+            try:
+                px_series = market_px[t]
+                px_date = px_series[:d].index[-1]
+                invested += row['Shares'] * px_series[px_date]
+            except:
+                pass 
+                
+        daily_mtm.append({"Date": d, "NAV": c + invested, "Benchmark_Px": market_px[BENCHMARK_TICKER][:d].iloc[-1] if not market_px[BENCHMARK_TICKER][:d].empty else 1.0})
         
-        unrealized_net_pnl = position_value - cost_basis_net
-        unrealized_gross_pnl = position_value - cost_basis_gross
-        open_position_costs = cost_basis_net - cost_basis_gross 
+    df_nav = pd.DataFrame(daily_mtm)
+    df_nav['Benchmark_Return'] = df_nav['Benchmark_Px'].pct_change().fillna(0)
+    df_nav['Benchmark_NAV'] = INITIAL_CAPITAL * (1 + df_nav['Benchmark_Return']).cumprod()
+    df_nav['Strategy_Return'] = df_nav['NAV'].pct_change().fillna(0)
+
+    # Current State Calculations
+    current_cash = df_cash.iloc[-1]['Cash']
+    total_invested_mtm = sum([qty * spot_prices[t] for t, qty in current_inventory.items() if qty > 0])
+    true_nav = current_cash + total_invested_mtm
+    unrealized_pnl = sum([(spot_prices[t] - current_vwap[t]) * qty for t, qty in current_inventory.items() if qty > 0])
+    open_costs = sum([costs_paid[t] for t, qty in current_inventory.items() if qty > 0])
+    
+    # ------------------------------------------
+    # RISK METRICS (Strict Covariance Matrix Slicing)
+    # ------------------------------------------
+    active_tickers = [t for t, q in current_inventory.items() if q > 0]
+    
+    if len(active_tickers) > 0 and len(df_nav) > 2:
+        # Returns for active assets only
+        hist_returns = market_px[active_tickers].pct_change().dropna()
+        cov_matrix = hist_returns.cov() * 252 # Annualized
         
-        total_nav += position_value
-        total_unrealized_net += unrealized_net_pnl
-        total_unrealized_gross += unrealized_gross_pnl
-        total_open_costs += open_position_costs
+        # Current Weights
+        weights = np.array([(current_inventory[t] * spot_prices[t]) / total_invested_mtm for t in active_tickers])
         
-        portfolio_data.append({
-            "Ticker": ticker,
+        # Portfolio Variance: W^T * Sigma * W
+        port_variance = np.dot(weights.T, np.dot(cov_matrix, weights))
+        port_volatility = np.sqrt(port_variance)
+        
+        # 1-Day 99% VaR (Parametric)
+        daily_volatility = port_volatility / np.sqrt(252)
+        var_99_1d = 2.326 * daily_volatility * total_invested_mtm
+        
+        # Beta & Alpha
+        bench_ret = df_nav['Benchmark_Return']
+        strat_ret = df_nav['Strategy_Return']
+        cov_sb = np.cov(strat_ret, bench_ret)[0][1]
+        var_b = np.var(bench_ret)
+        beta = cov_sb / var_b if var_b != 0 else 0.0
+        
+        cum_strat_ret = (true_nav - INITIAL_CAPITAL) / INITIAL_CAPITAL
+        cum_bench_ret = (df_nav.iloc[-1]['Benchmark_NAV'] - INITIAL_CAPITAL) / INITIAL_CAPITAL
+        
+        days_held = (df_nav.iloc[-1]['Date'] - df_nav.iloc[0]['Date']).days
+        rfr_period = RFR_ANNUAL * (days_held / 365.25)
+        
+        # Jensen's Alpha
+        alpha = cum_strat_ret - (rfr_period + beta * (cum_bench_ret - rfr_period))
+        
+        # Daily Sharpe
+        daily_rfr = RFR_ANNUAL / 252
+        sharpe = np.sqrt(252) * ((strat_ret.mean() - daily_rfr) / strat_ret.std()) if strat_ret.std() != 0 else 0.0
+
+    else:
+        var_99_1d, beta, alpha, sharpe = 0.0, 0.0, 0.0, 0.0
+
+    # ------------------------------------------
+    # TOP LEVEL METRICS
+    # ------------------------------------------
+    st.subheader("Treasury Aggregates")
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1.metric("True MTM NAV", f"€{true_nav:,.2f}")
+    col2.metric("Residual Cash", f"€{current_cash:,.2f}")
+    col3.metric("Invested MTM", f"€{total_invested_mtm:,.2f}")
+    col4.metric("Unrealized PnL", f"€{unrealized_pnl:,.2f}")
+    col5.metric("Accounting Check (Zero Diff)", f"€{(current_cash + total_invested_mtm) - true_nav:,.2f}")
+    col6.metric("Friction (Open Positions)", f"€{open_costs:,.2f}")
+
+    st.markdown("---")
+    st.subheader("Risk Analytics")
+    rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+    rcol1.metric("Live Portfolio Beta", f"{beta:.3f}")
+    rcol2.metric("1-Day 99% VaR", f"€{var_99_1d:,.2f}")
+    rcol3.metric("Daily Sharpe Ratio", f"{sharpe:.2f}")
+    rcol4.metric("Jensen's Alpha (Cum.)", f"{alpha * 100:.2f}%")
+
+    st.markdown("---")
+    
+    # ------------------------------------------
+    # CHARTS
+    # ------------------------------------------
+    c1, c2 = st.columns([2, 1])
+    
+    with c1:
+        st.subheader("Strategy NAV vs ^STOXX50E (Scaled)")
+        fig_nav = go.Figure()
+        fig_nav.add_trace(go.Scatter(x=df_nav['Date'], y=df_nav['NAV'], mode='lines', name='Strategy MTM NAV', line=dict(color='#00d4ff')))
+        fig_nav.add_trace(go.Scatter(x=df_nav['Date'], y=df_nav['Benchmark_NAV'], mode='lines', name='Eurostoxx 50 (Scaled)', line=dict(color='#ff00d4')))
+        fig_nav.update_layout(margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", hovermode="x unified")
+        st.plotly_chart(fig_nav, use_container_width=True)
+        
+    with c2:
+        st.subheader("MTM Allocation")
+        if total_invested_mtm > 0:
+            alloc_data = [{"Ticker": t, "Notional": current_inventory[t] * spot_prices[t]} for t in active_tickers]
+            alloc_data.append({"Ticker": "Cash", "Notional": current_cash})
+            df_alloc = pd.DataFrame(alloc_data)
+            fig_pie = px.pie(df_alloc, names='Ticker', values='Notional', hole=0.6)
+            fig_pie.update_layout(margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("No open positions. 100% Cash.")
+
+    # ------------------------------------------
+    # OPEN POSITIONS TABLE
+    # ------------------------------------------
+    st.subheader("Open Positions & PnL Ledger")
+    
+    table_data = []
+    for t in active_tickers:
+        qty = current_inventory[t]
+        spot = spot_prices[t]
+        vwap_px = current_vwap[t]
+        notional = qty * spot
+        weight = notional / true_nav
+        gross_pnl = (spot - vwap_px) * qty
+        costs = costs_paid[t]
+        net_pnl = gross_pnl - costs
+        
+        table_data.append({
+            "Ticker": t,
             "Net Qty": qty,
-            "Spot Price (€)": round(spot_price, 2),
-            "Gross PnL (€)": round(unrealized_gross_pnl, 2),
-            "Costs Paid (€)": round(open_position_costs, 2),
-            "Real Net PnL (€)": round(unrealized_net_pnl, 2),
-            "Notional (€)": round(position_value, 2)
+            "Cost Basis (VWAP)": round(vwap_px, 4),
+            "Spot Price": round(spot, 4),
+            "Notional (€)": notional,
+            "Weight (%)": weight * 100,
+            "Unrealized Gross PnL": gross_pnl,
+            "Costs Paid": costs,
+            "Real Net PnL": net_pnl
         })
         
-    df_portfolio = pd.DataFrame(portfolio_data)
-    
-# Calculate Advanced Risk & Performance Metrics
-    if total_nav > 0:
-        df_portfolio['Weight'] = df_portfolio['Notional (€)'] / total_nav
-        weights = df_portfolio['Weight'].values
+    if table_data:
+        df_table = pd.DataFrame(table_data)
         
-        # 1. Risk Metrics
-        live_beta = sum(row['Weight'] * asset_betas[row['Ticker']] for _, row in df_portfolio.iterrows())
-        port_variance = np.dot(weights.T, np.dot(cov_matrix.values, weights))
-        port_std_dev = np.sqrt(port_variance)
-        live_var_99 = total_nav * port_std_dev * 2.33 
-        
-        # 2. Backcasted Performance Metrics (CUMULATIVE & DAILY - No Annualization)
-        asset_returns = historical_returns[tickers]
-        portfolio_daily_returns = asset_returns.dot(weights)
-        index_daily_returns = historical_returns['^STOXX50E']
-        
-        # Calculate Total Cumulative Returns
-        port_total_ret = (1 + portfolio_daily_returns).prod() - 1
-        idx_total_ret = (1 + index_daily_returns).prod() - 1
-        
-        # Adjust Risk-Free Rate for the exact number of trading days
-        n_days = len(portfolio_daily_returns)
-        daily_rf = RISK_FREE_RATE / 252
-        period_rf = (1 + daily_rf)**n_days - 1
-        
-        # Daily Sharpe Ratio
-        port_daily_mean = portfolio_daily_returns.mean()
-        port_daily_std = portfolio_daily_returns.std()
-        daily_sharpe = (port_daily_mean - daily_rf) / port_daily_std if port_daily_std > 0 else 0
-        
-        # Cumulative Jensen's Alpha (Total exact alpha since inception)
-        jensens_alpha_cum = port_total_ret - (period_rf + live_beta * (idx_total_ret - period_rf))
-        
+        # Styling
+        def style_pnl(val):
+            color = '#00ff88' if val > 0 else '#ff4444' if val < 0 else 'white'
+            return f'color: {color}'
+
+        styled_table = df_table.style.map(style_pnl, subset=['Unrealized Gross PnL', 'Real Net PnL']) \
+                                    .format({"Notional (€)": "{:,.2f}", "Weight (%)": "{:.2f}%", 
+                                             "Unrealized Gross PnL": "{:,.2f}", "Costs Paid": "{:,.2f}", 
+                                             "Real Net PnL": "{:,.2f}"})
+        st.dataframe(styled_table, use_container_width=True, hide_index=True)
     else:
-        live_beta, live_var_99, daily_sharpe, jensens_alpha_cum = 0, 0, 0, 0
-        portfolio_daily_returns, index_daily_returns = pd.Series(), pd.Series()
+        st.info("No active equity positions in the ledger.")
 
-    # --- RENDER UI ---
-    st.markdown("### 📊 Live Portfolio State")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric(label="Total NAV", value=f"€{total_nav:,.2f}")
-    with col2:
-        pnl_color = "normal" if total_unrealized_net >= 0 else "inverse"
-        st.metric(label="Real Net PnL", value=f"€{total_unrealized_net:,.2f}", delta=f"€{total_unrealized_net:,.2f}", delta_color=pnl_color)
-    with col3:
-        st.metric("Unrealized Gross PnL", f"€{total_unrealized_gross:,.2f}")
-    with col4:
-        st.metric("Open Position Friction", f"€{-total_open_costs:,.2f}")
-
-    st.markdown("### 📐 Performance & Risk Metrics")
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Live Portfolio Beta", f"{live_beta:.2f}")
-    r2.metric("1-Day 99% VaR", f"€{-live_var_99:,.2f}")
-    r3.metric("Daily Sharpe Ratio", f"{daily_sharpe:.3f}")
-    r4.metric("Cumulative Alpha", f"{jensens_alpha_cum * 100:.2f}%", help=f"Total absolute alpha generated over the {n_days}-day trading period.")
-        
-    st.markdown("---")
-    
-    # Portfolio Table
-    def color_pnl(val):
-        return f"background-color: {'rgba(39, 174, 96, 0.3)' if val > 0 else 'rgba(231, 76, 60, 0.3)' if val < 0 else ''}"
-
-    styled_df = df_portfolio.style.format({
-        "Spot Price (€)": "€{:.2f}",
-        "Gross PnL (€)": "€{:,.2f}",
-        "Costs Paid (€)": "€{:,.2f}",
-        "Real Net PnL (€)": "€{:,.2f}",
-        "Notional (€)": "€{:,.2f}",
-        "Weight": "{:.2%}"
-    }).map(color_pnl, subset=['Real Net PnL (€)', 'Gross PnL (€)'])
-    
-    st.dataframe(styled_df, use_container_width=True)
-
-# --- CHARTS SECTION (SIDE-BY-SIDE) ---
-    st.markdown("---")
-    
-    col_chart, col_pie = st.columns([7, 3])
-    
-    with col_chart:
-        st.subheader("📈 Strategy Performance vs Benchmark (Base 100)")
-        if total_nav > 0:
-            
-            raw_data = yf.download(tickers + ['^STOXX50E'], start=inception_date, progress=False)
-            hist_prices = raw_data['Adj Close'] if 'Adj Close' in raw_data.columns else raw_data['Close']
-            
-            index_prices = hist_prices['^STOXX50E']
-            # Drop the index from the portfolio prices
-            portfolio_prices = hist_prices.drop(columns=['^STOXX50E'], errors='ignore') 
-            
-            # Execute your logic to get the two Base 100 vectors
-            strategy_b100, index_b100 = calculate_performance_vectors(
-                '../mi_cartera/historial_operaciones.csv', 
-                portfolio_prices,
-                index_prices,
-                STARTING_NAV # Using your 10M starting point
-            )
-            
-            # Plot the vectors
-            df_chart = pd.DataFrame({
-                'Strategy (True NAV)': strategy_b100,
-                'Eurostoxx 50': index_b100
-            })
-            
-            st.line_chart(df_chart, color=["#1f77b4", "#7f7f7f"])
-            
-    with col_pie:
-        st.subheader("🍩 Capital Allocation (Invested)")
-        if total_nav > 0:
-            fig = px.pie(
-                df_portfolio, 
-                values='Notional (€)', 
-                names='Ticker', 
-                hole=0.4,
-                color_discrete_sequence=px.colors.qualitative.Pastel
-            )
-            fig.update_layout(margin=dict(t=20, b=20, l=20, r=20), showlegend=True)
-            st.plotly_chart(fig, use_container_width=True)
-
-    # --- REFRESH LOGIC ---
-    st.caption(f"Last updated: {time.strftime('%H:%M:%S')} | Total Historical Costs: €{total_historical_costs:,.2f} | Auto-refreshing every {REFRESH_RATE} seconds...")
-    time.sleep(REFRESH_RATE)
-    st.rerun()
+    # Loop
+    if auto_refresh:
+        time.sleep(10)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
