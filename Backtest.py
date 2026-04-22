@@ -243,3 +243,148 @@ class BacktestEngine:
             historial[fecha] = vp
 
         return pd.Series(historial)
+    
+# Añadir a Backtest.py o crear BacktestRandom.py
+
+class BacktestRandom:
+    """Backtest rápido de una estrategia aleatoria:
+    - elige n_activos al azar
+    - asigna pesos aleatorios entre 2% y 20%
+    - mantiene la cartera una semana
+    - aplica costes según turnover
+    """
+
+    def __init__(self, universo, proveedor, start_date: str, end_date: str,
+                 nominal: float, n_activos: int = 15):
+        self.universo = universo
+        self.proveedor = proveedor
+        self.start_date = pd.Timestamp(start_date)
+        self.end_date = pd.Timestamp(end_date)
+        self.nominal = nominal
+        self.n_activos = n_activos
+        self.peso_min = 0.02
+        self.peso_max = 0.20
+
+        dias_hasta_viernes = (4 - self.start_date.weekday()) % 7
+        if dias_hasta_viernes > 0:
+            self.start_date += pd.DateOffset(days=dias_hasta_viernes)
+
+        tickers = universo.get_full_ticker_list()
+        self.costes = calcular_costes(tickers)
+
+        self.df = proveedor.download_prices_weekly(
+            tickers,
+            self.start_date.strftime("%Y-%m-%d"),
+            self.end_date.strftime("%Y-%m-%d"),
+        )
+        self.df["Fecha"] = pd.to_datetime(self.df["Fecha"])
+
+        self.precios = (
+            self.df.pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+            .sort_index()
+        )
+
+        self.fechas = [f for f in self.precios.index if self.start_date <= f <= self.end_date]
+        if len(self.fechas) < 2:
+            raise ValueError("No hay suficientes fechas para ejecutar el backtest.")
+
+    def _generar_pesos(self, n: int, rng) -> np.ndarray:
+        while True:
+            w = rng.dirichlet(np.ones(n))
+            if (w >= self.peso_min).all() and (w <= self.peso_max).all():
+                return w
+
+    def _cartera_aleatoria(self, fecha, rng) -> dict[str, float]:
+        tickers_validos = list(self.universo.get_universe_at_date(fecha))
+        precios_hoy = self.precios.loc[fecha]
+
+        tickers_validos = [t for t in tickers_validos if t in precios_hoy.index and pd.notna(precios_hoy[t])]
+        if not tickers_validos:
+            return {}
+
+        n = min(self.n_activos, len(tickers_validos))
+        elegidos = rng.choice(tickers_validos, size=n, replace=False)
+        pesos = self._generar_pesos(n, rng)
+
+        return {t: float(p) for t, p in zip(elegidos, pesos)}
+
+    def _coste_cambio(self, cartera_ant, cartera_nueva) -> float:
+        tickers = set(cartera_ant) | set(cartera_nueva)
+        coste = 0.0
+        for t in tickers:
+            delta = abs(cartera_nueva.get(t, 0.0) - cartera_ant.get(t, 0.0))
+            coste += delta * self.costes.get(t, 0.0005)
+        return coste
+
+    def _retorno_cartera(self, cartera, fecha, fecha_sig) -> float:
+        if not cartera:
+            return 0.0
+
+        precios_0 = self.precios.loc[fecha]
+        precios_1 = self.precios.loc[fecha_sig]
+
+        retorno = 0.0
+        suma_pesos = 0.0
+
+        for t, w in cartera.items():
+            p0 = precios_0.get(t, np.nan)
+            p1 = precios_1.get(t, np.nan)
+            if pd.notna(p0) and pd.notna(p1) and p0 != 0:
+                retorno += w * (p1 / p0 - 1)
+                suma_pesos += w
+
+        return retorno / suma_pesos if suma_pesos > 0 else 0.0
+
+    def _run_once(self, seed: int | None = None) -> pd.Series:
+        rng = np.random.default_rng(seed)
+        vp = self.nominal
+        historial = {self.fechas[0]: vp}
+        cartera_ant = {}
+
+        for i in range(len(self.fechas) - 1):
+            fecha = self.fechas[i]
+            fecha_sig = self.fechas[i + 1]
+
+            cartera = self._cartera_aleatoria(fecha, rng)
+            coste = self._coste_cambio(cartera_ant, cartera)
+            retorno = self._retorno_cartera(cartera, fecha, fecha_sig)
+
+            vp *= (1 - coste)
+            vp *= (1 + retorno)
+
+            historial[fecha_sig] = vp
+            cartera_ant = cartera
+
+        return pd.Series(historial).sort_index()
+
+    def run_montecarlo(self, n_sims: int = 1000, benchmark: str | None = None) -> dict:
+        series = [self._run_once(seed=i) for i in range(n_sims)]
+        df_sims = pd.concat(series, axis=1)
+        df_sims.columns = [f"sim_{i}" for i in range(n_sims)]
+
+        resultados = {
+            "media": df_sims.mean(axis=1),
+            "std": df_sims.std(axis=1),
+            "p10": df_sims.quantile(0.10, axis=1),
+            "p50": df_sims.quantile(0.50, axis=1),
+            "p90": df_sims.quantile(0.90, axis=1),
+            "todas": df_sims,
+        }
+
+        if benchmark:
+            df_bmk = self.proveedor.download_prices_weekly(
+                [benchmark],
+                self.start_date.strftime("%Y-%m-%d"),
+                self.end_date.strftime("%Y-%m-%d"),
+            )
+            df_bmk["Fecha"] = pd.to_datetime(df_bmk["Fecha"])
+            serie_bmk = (
+                df_bmk.set_index("Fecha")["Precio_Close"]
+                .sort_index()
+                .reindex(self.fechas)
+                .ffill()
+            )
+            serie_bmk = serie_bmk / serie_bmk.iloc[0] * self.nominal
+            resultados["benchmark"] = serie_bmk
+
+        return resultados

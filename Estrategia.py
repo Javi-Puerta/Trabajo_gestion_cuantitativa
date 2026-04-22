@@ -1,6 +1,8 @@
+import random
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
+import yfinance as yf
 from Modelos import ModeloBase
 from sklearn.covariance import LedoitWolf
 from scipy.optimize import minimize
@@ -130,8 +132,7 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
                 best_sharpe, best_pesos = sharpe, pesos
 
         return {t: float(best_pesos[i]) for i, t in enumerate(tickers_mc)}
-
-import yfinance as yf
+    
 
 class EstrategiaMLEquiponderadaMacro(EstrategiaMLEquiponderada):
     def __init__(self, modelo, n_activos_obj, umbral_salida,
