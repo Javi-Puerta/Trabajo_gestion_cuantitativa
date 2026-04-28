@@ -127,17 +127,26 @@ class MotorInversion:
                 accion = "VENTA"
                 precio_ejec = precio * (1 - coste)
                 uds = math.floor(abs(vp * peso) / precio_ejec)
+                uds = min(uds, uds_antiguas)
                 uds_nueva = uds_antiguas - uds
                 self.cartera["cash"] += uds * precio_ejec
             else:
                 accion = "MANTENER"
                 precio_ejec = precio
                 uds_nueva = uds_antiguas
+                uds = 0
                 coste = 0.0
-            self.cartera[ticker] = uds_nueva
+            if uds_nueva == 0:
+                self.cartera.pop(ticker, None)
+            else:
+                self.cartera[ticker] = uds_nueva
             filas.append({"Ticker": ticker, "Accion": accion, "Cantidad": int(abs(uds)), "Precio": precio,
                          "CT": precio * coste, "Precio_Ejecutado": precio_ejec})
 
+        for t, q in self.cartera.items(): #Comprobación
+            if t != "cash" and q < 0:
+                raise ValueError(f"Posición negativa detectada: {t} = {q}")
+            
         return pd.DataFrame(filas).sort_values("Accion").reset_index(drop=True)
 
     def _cargar_cartera(self) -> pd.DataFrame:
