@@ -10,82 +10,151 @@ from ProveedorDatos import YFinanceProvider
 from VariablesTransformation import FeatureEngineer
 from UniversoActivos import UniversoActivosEstatico
 
+def _descargar_precios(tickers, start, end, auto_adjust=True):
+    tickers = list(dict.fromkeys(tickers))
+    precios = yf.download(
+        tickers, start=start, end=end,
+        auto_adjust=auto_adjust, progress=False
+    )["Close"].ffill()
+
+    if isinstance(precios, pd.Series):
+        precios = precios.to_frame(tickers[0])
+
+    return precios
+
+
+def _valor_posicion(fecha, pos, precios):
+    return sum(
+        q * precios[t].asof(fecha)
+        for t, q in pos.items()
+        if t in precios.columns and pd.notna(precios[t].asof(fecha))
+    )
+
+
+def estado_cartera(fecha, df, capital_inicial=10_000_000, incluir_costes=True):
+    df = df.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"])
+    ops = df[df["fecha"] <= pd.Timestamp(fecha)].sort_values("fecha")
+
+    pos, cash = {}, float(capital_inicial)
+
+    for r in ops.itertuples():
+        accion = str(r.Accion).upper()
+
+        if accion == "MANTENER":
+            continue
+        if accion not in {"COMPRA", "VENTA"}:
+            continue
+
+        precio = r.Precio_Ejecutado if incluir_costes else r.Precio
+
+        if accion == "COMPRA":
+            pos[r.Ticker] = pos.get(r.Ticker, 0.0) + r.Cantidad
+            cash -= r.Cantidad * precio
+        else:
+            pos[r.Ticker] = pos.get(r.Ticker, 0.0) - r.Cantidad
+            cash += r.Cantidad * precio
+
+    pos = {t: q for t, q in pos.items() if q != 0}
+    return pos, cash
+
+
+def _nav(fecha, pos, cash, precios):
+    return cash + _valor_posicion(fecha, pos, precios)
+
 def cartera(fecha, df):
     '''Devuelve un diccionario con los componentes de la cartera en una fecha dada.'''
-    df_fecha = df[df["fecha"] <= fecha]
-    cartera = {}
-    for _, row in df_fecha.iterrows():
-        ticker = row["Ticker"]
-        if row["Accion"] == "COMPRA":
-            cantidad = row["Cantidad"]
-        else:
-            cantidad = -row["Cantidad"]
-        cartera[ticker] = cartera.get(ticker, 0) + cantidad
-    return {ticker: cantidad for ticker, cantidad in cartera.items() if cantidad != 0}
+    pos, _ = estado_cartera(
+        fecha=fecha,
+        df=df,
+        capital_inicial=0,
+        incluir_costes=False
+    )
+    return pos
 
-def calcular_cash_diario(df, capital_inicial=10000000, incluir_costes=True):
-    cash = capital_inicial
+def calcular_cash_diario(df, capital_inicial=10_000_000, incluir_costes=True):
+    df = df.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"])
+
+    cash = float(capital_inicial)
     historial_cash = {}
-    
-    for fecha, grupo in df.groupby("fecha"):
-        for _, row in grupo.iterrows():
-            precio = row["Precio_Ejecutado"] if incluir_costes else row["Precio"]
-            if row["Accion"] == "COMPRA":
-                cash -= row["Cantidad"] * precio
+
+    for fecha, grupo in df.sort_values("fecha").groupby("fecha"):
+        for r in grupo.itertuples():
+            accion = str(r.Accion).upper()
+
+            if accion == "MANTENER":
+                continue
+            if accion not in {"COMPRA", "VENTA"}:
+                continue
+
+            precio = r.Precio_Ejecutado if incluir_costes else r.Precio
+
+            if accion == "COMPRA":
+                cash -= r.Cantidad * precio
             else:
-                cash += row["Cantidad"] * precio
+                cash += r.Cantidad * precio
+
         historial_cash[fecha] = cash
-    
+
     return pd.Series(historial_cash)
 
-def valor_cartera_diario(df, capital_inicial=10000000, incluir_costes=True):
+def valor_cartera_diario(df, capital_inicial=10_000_000, incluir_costes=True, auto_adjust=True):
     '''Calcula el valor diario de la cartera usando precios de cierre de yfinance.'''
+    df = df.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"])
+
     tickers = df["Ticker"].unique().tolist()
-    start_date = df["fecha"].min()
-    end_date = df["fecha"].max() + pd.Timedelta(days=30)
-    fechas = df["fecha"].unique()
-    
-    precios = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False, progress=False)["Close"]
-    precios = precios.ffill()
-    
-    cash_diario = calcular_cash_diario(df, capital_inicial, incluir_costes).reindex(precios.index).ffill()
-    
+    start = df["fecha"].min()
+    end = df["fecha"].max() + pd.Timedelta(days=30)
+
+    precios = _descargar_precios(tickers, start, end, auto_adjust=auto_adjust)
+
     historial = {}
     for fecha in precios.index:
-        cartera_fecha = cartera(fecha, df)
-        valor = cash_diario.get(fecha, capital_inicial)
-        for ticker, cantidad in cartera_fecha.items():
-            valor += cantidad * precios.loc[fecha, ticker]
-        historial[fecha] = valor
-    
+        pos, cash = estado_cartera(fecha, df, capital_inicial, incluir_costes)
+        historial[fecha] = _nav(fecha, pos, cash, precios)
+
     return pd.Series(historial)
 
-def rentabilidad_semanal_por_periodo(df, capital_inicial=10000000):
+def resumen_nav_desagregacion(df, universo_tickers, capital_inicial=10_000_000,
+                              benchmark="^STOXX50E", fecha_valor=None,
+                              auto_adjust=True):
+    _, _, final = _calcular_atribucion(
+        df, universo_tickers, capital_inicial, benchmark, fecha_valor, auto_adjust
+    )
+    return final
+
+def rentabilidad_semanal_por_periodo(df, capital_inicial=10_000_000,
+                                     incluir_costes=True, auto_adjust=True):
     '''Calcula la rentabilidad de la cartera y el STOXX50 entre cada fecha de operación.'''
+    df = df.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"])
+
     fechas_op = sorted(df["fecha"].unique())
     tickers = df["Ticker"].unique().tolist()
-    
-    # Descargamos precios sin ajustar para la cartera y con ajustar para el benchmark
-    start = fechas_op[0]
+
+    start = fechas_op[0] - pd.Timedelta(days=7)
     end = fechas_op[-1] + pd.Timedelta(days=7)
-    precios = yf.download(tickers, start=start, end=end, auto_adjust=False, progress=False)["Close"].ffill()
-    stoxx = yf.download("^STOXX50E", start=start, end=end, auto_adjust=True, progress=False)["Close"].squeeze().ffill()
+
+    precios = _descargar_precios(tickers, start, end, auto_adjust=auto_adjust)
+    stoxx = yf.download(
+        "^STOXX50E", start=start, end=end,
+        auto_adjust=auto_adjust, progress=False
+    )["Close"].squeeze().ffill()
 
     resultados = []
-    for i in range(len(fechas_op) - 1):
-        fecha_ini = fechas_op[i]
-        fecha_fin = fechas_op[i + 1]
 
-        # Pesos de la cartera en fecha_ini (sin costes, usamos Precio no Precio_Ejecutado)
-        cartera_ini = cartera(fecha_ini, df)  # {ticker: cantidad}
-        valor_total = sum(cartera_ini[t] * precios[t].asof(fecha_ini) for t in cartera_ini if t in precios.columns)
-        pesos = {t: (cartera_ini[t] * precios[t].asof(fecha_ini)) / valor_total for t in cartera_ini if t in precios.columns}
+    for fecha_ini, fecha_fin in zip(fechas_op[:-1], fechas_op[1:]):
+        pos, cash = estado_cartera(fecha_ini, df, capital_inicial, incluir_costes)
 
-        ret_cartera = sum(
-            pesos[t] * (precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1)
-            for t in pesos if t in precios.columns
-        )
+        nav_ini = _nav(fecha_ini, pos, cash, precios)
+        nav_fin = _nav(fecha_fin, pos, cash, precios)
 
+        if nav_ini == 0 or pd.isna(nav_ini) or pd.isna(nav_fin):
+            continue
+
+        ret_cartera = nav_fin / nav_ini - 1
         ret_stoxx = stoxx.asof(fecha_fin) / stoxx.asof(fecha_ini) - 1
 
         resultados.append({
@@ -97,35 +166,200 @@ def rentabilidad_semanal_por_periodo(df, capital_inicial=10000000):
 
     return pd.DataFrame(resultados).set_index("Periodo")
 
-def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers):
+def _calcular_atribucion(df, universo_tickers, capital_inicial=10_000_000,
+                         benchmark="^STOXX50E", fecha_valor=None,
+                         auto_adjust=True, guardar_detalle=False):
+    df = df.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"])
+    fecha_valor = pd.Timestamp.today().normalize() if fecha_valor is None else pd.Timestamp(fecha_valor)
+
+    fechas_op = sorted(df.loc[df["fecha"] <= fecha_valor, "fecha"].unique())
+    tickers = sorted(set(df["Ticker"]) | set(universo_tickers))
+    start, end = fechas_op[0] - pd.Timedelta(days=7), fecha_valor + pd.Timedelta(days=2)
+
+    precios = yf.download(tickers, start=start, end=end,
+                          auto_adjust=auto_adjust, progress=False)["Close"].ffill()
+    if isinstance(precios, pd.Series):
+        precios = precios.to_frame(tickers[0])
+
+    bmk = yf.download(benchmark, start=start, end=end,
+                      auto_adjust=auto_adjust, progress=False)["Close"].squeeze().ffill()
+
+    fecha_valor = precios.index[precios.index <= fecha_valor].max()
+    w_bmk = 1 / len(universo_tickers)
+
+    pos, cash = {}, capital_inicial
+    resumen, detalles = [], {}
+
+    def valor_pos(fecha):
+        return sum(
+            q * precios[t].asof(fecha)
+            for t, q in pos.items()
+            if t in precios.columns and pd.notna(precios[t].asof(fecha))
+        )
+
+    for i, f0 in enumerate(fechas_op):
+        f1 = fechas_op[i + 1] if i + 1 < len(fechas_op) else fecha_valor
+
+        ops = df[df["fecha"].eq(f0)]
+        cash_sin_coste = cash
+        coste_eur = (ops["Cantidad"] * (ops["Precio_Ejecutado"] - ops["Precio"]).abs()).sum()
+
+        for r in ops.itertuples():
+            if r.Accion == "MANTENER":
+                continue
+
+            signo = 1 if r.Accion == "COMPRA" else -1
+            pos[r.Ticker] = pos.get(r.Ticker, 0) + signo * r.Cantidad
+
+            if r.Accion == "COMPRA":
+                cash_sin_coste -= r.Cantidad * r.Precio
+                cash -= r.Cantidad * r.Precio_Ejecutado
+            else:
+                cash_sin_coste += r.Cantidad * r.Precio
+                cash += r.Cantidad * r.Precio_Ejecutado
+
+        pos = {t: q for t, q in pos.items() if q != 0}
+
+        nav0 = cash + valor_pos(f0)
+
+        if nav0 <= 0:
+            continue
+
+        r_bmk = 0 if f1 == f0 else bmk.asof(f1) / bmk.asof(f0) - 1
+        coste = coste_eur / nav0
+        seleccion = peso = ret_bruta = 0.0
+        filas = []
+
+        for t, q in pos.items():
+            if t not in precios.columns:
+                continue
+
+            p0, p1 = precios[t].asof(f0), precios[t].asof(f1)
+            if pd.isna(p0) or pd.isna(p1) or p0 == 0:
+                continue
+
+            r = 0 if f1 == f0 else p1 / p0 - 1
+            w = q * p0 / nav0
+            exceso = r - r_bmk
+
+            ef_sel = w_bmk * exceso
+            ef_peso = (w - w_bmk) * exceso
+
+            ret_bruta += w * r
+            seleccion += ef_sel
+            peso += ef_peso
+
+            filas.append({
+                "Ticker": t,
+                "Peso": w,
+                "Retorno": r,
+                "P&L bruto (€)": q * (p1 - p0),
+                "Ef. Selección": ef_sel,
+                "Ef. Peso": ef_peso,
+            })
+
+        peso += (cash_sin_coste / nav0) * (-r_bmk)
+        ret_neta = r_bmk + seleccion + peso - coste
+
+        periodo = f"{pd.Timestamp(f0).date()} → {pd.Timestamp(f1).date()}"
+        resumen.append({
+            "Periodo": periodo,
+            "NAV inicial": nav0,
+            "Rent. cartera neta": ret_neta,
+            "Efecto mercado": r_bmk,
+            "Ef. selección": seleccion,
+            "Ef. pesos": peso,
+            "Costes": -coste,
+            "Resultado neto (€)": nav0 * ret_neta,
+            "Mercado (€)": nav0 * r_bmk,
+            "Selección (€)": nav0 * seleccion,
+            "Pesos (€)": nav0 * peso,
+            "Costes (€)": -coste_eur,
+            "Check suma": ret_neta - (r_bmk + seleccion + peso - coste),
+        })
+
+        if guardar_detalle and filas:
+            detalles[periodo] = pd.DataFrame(filas).set_index("Ticker")
+
+    semanal = pd.DataFrame(resumen).set_index("Periodo")
+
+    nav = cash + valor_pos(fecha_valor)
+    final = pd.Series({
+        "Fecha valoración": fecha_valor.date(),
+        "NAV": nav,
+        "NAV normalizado": nav / capital_inicial,
+        "Rentabilidad NAV": nav / capital_inicial - 1,
+        "Efecto mercado (€)": semanal["Mercado (€)"].sum(),
+        "Ef. selección (€)": semanal["Selección (€)"].sum(),
+        "Ef. pesos (€)": semanal["Pesos (€)"].sum(),
+        "Costes (€)": semanal["Costes (€)"].sum(),
+        "Resultado NAV (€)": nav - capital_inicial,
+    })
+
+    final["Check NAV (€)"] = (
+        final["Efecto mercado (€)"]
+        + final["Ef. selección (€)"]
+        + final["Ef. pesos (€)"]
+        + final["Costes (€)"]
+        - final["Resultado NAV (€)"]
+    )
+
+    return semanal, detalles, final
+
+def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers,
+                    capital_inicial=10_000_000, incluir_costes=True,
+                    auto_adjust=True):
     '''Combina resultados y atribución en una única tabla por semana.'''
-    precios = yf.download(universo_tickers, start=fecha_ini - pd.Timedelta(days=7),
-                          end=fecha_fin + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"].ffill()
-    stoxx = yf.download("^STOXX50E", start=fecha_ini - pd.Timedelta(days=7),
-                        end=fecha_fin + pd.Timedelta(days=1), auto_adjust=True, progress=False)["Close"].squeeze().ffill()
+    fecha_ini = pd.Timestamp(fecha_ini)
+    fecha_fin = pd.Timestamp(fecha_fin)
+
+    precios = _descargar_precios(
+        universo_tickers,
+        fecha_ini - pd.Timedelta(days=7),
+        fecha_fin + pd.Timedelta(days=1),
+        auto_adjust=auto_adjust
+    )
+
+    stoxx = yf.download(
+        "^STOXX50E",
+        start=fecha_ini - pd.Timedelta(days=7),
+        end=fecha_fin + pd.Timedelta(days=1),
+        auto_adjust=auto_adjust,
+        progress=False
+    )["Close"].squeeze().ffill()
 
     ret_universo = pd.Series({
         t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
-        for t in universo_tickers if t in precios.columns
+        for t in universo_tickers
+        if t in precios.columns
+        and pd.notna(precios[t].asof(fecha_ini))
+        and pd.notna(precios[t].asof(fecha_fin))
+        and precios[t].asof(fecha_ini) != 0
     }).sort_values(ascending=False)
-    ret_universo = ret_universo.dropna()
+
     ranking = ret_universo.rank(ascending=False).astype(int)
     ret_top15 = ret_universo.iloc[14] if len(ret_universo) > 14 else ret_universo.iloc[-1]
     ret_stoxx = stoxx.asof(fecha_fin) / stoxx.asof(fecha_ini) - 1
     ret_bmk_ew = ret_universo.mean()
     peso_bmk = 1 / len(universo_tickers)
 
-    cartera_ini = cartera(fecha_ini, df)
-    valor_total = sum(cartera_ini[t] * precios[t].asof(fecha_ini) for t in cartera_ini if t in precios.columns)
+    pos, cash = estado_cartera(fecha_ini, df, capital_inicial, incluir_costes)
+    nav_ini = _nav(fecha_ini, pos, cash, precios)
+    nav_fin = _nav(fecha_fin, pos, cash, precios)
+    ret_cartera = nav_fin / nav_ini - 1
 
     resultados = []
-    for t, cantidad in cartera_ini.items():
+
+    for t, cantidad in pos.items():
         if t not in ret_universo:
             continue
+
         precio_ini = precios[t].asof(fecha_ini)
         precio_fin = precios[t].asof(fecha_fin)
-        peso = (cantidad * precio_ini) / valor_total
         retorno = ret_universo[t]
+        peso = cantidad * precio_ini / nav_ini
+
         resultados.append({
             "Ticker": t,
             "Peso": peso,
@@ -140,7 +374,18 @@ def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers):
 
     df_resultado = pd.DataFrame(resultados).set_index("Ticker").sort_values("Ranking")
 
-    ret_cartera = (df_resultado["Peso"] * df_resultado["Retorno"]).sum()
+    if abs(cash) > 1e-9:
+        df_resultado.loc["CASH"] = {
+            "Peso": cash / nav_ini,
+            "Retorno": 0.0,
+            "P&L (€)": 0.0,
+            "Ranking": "-",
+            "Diff vs Top15": -ret_top15,
+            "Ef. Selección": 0.0,
+            "Ef. Peso": (cash / nav_ini) * (-ret_stoxx),
+            "Top 15?": "-"
+        }
+
     df_resultado.loc["TOTAL"] = {
         "Peso": df_resultado["Peso"].sum(),
         "Retorno": ret_cartera,
@@ -152,20 +397,74 @@ def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers):
         "Top 15?": f"Alpha vs STOXX: {ret_cartera - ret_stoxx:+.2%}"
     }
 
-    hit_rate = (df_resultado.iloc[:-1]["Top 15?"] == "✓").mean()
-    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()} | Ret. Cartera: {ret_cartera:.2%} | Hit rate: {hit_rate:.0%} | BMK STOXX: {ret_stoxx:.2%} | BMK EW: {ret_bmk_ew:.2%}")
+    tickers_reales = df_resultado.index.difference(["CASH", "TOTAL"])
+    hit_rate = (df_resultado.loc[tickers_reales, "Top 15?"] == "✓").mean()
+
+    print(
+        f"Periodo: {fecha_ini.date()} → {fecha_fin.date()} | "
+        f"Ret. Cartera: {ret_cartera:.2%} | "
+        f"Hit rate: {hit_rate:.0%} | "
+        f"BMK STOXX: {ret_stoxx:.2%} | "
+        f"BMK EW: {ret_bmk_ew:.2%}"
+    )
+
     return df_resultado
 
 
-def analisis_todas_semanas(df, universo_tickers):
-    fechas_op = sorted(df["fecha"].unique())
-    for i in range(len(fechas_op) - 1):
-        tabla = analisis_semana(fechas_op[i], fechas_op[i + 1], df, universo_tickers)
-        display(tabla.style.format({
-            "Peso": "{:.2%}", "Retorno": "{:.2%}", "P&L (€)": "{:,.0f}",
-            "Diff vs Top15": "{:.2%}", "Ef. Selección": "{:.2%}", "Ef. Peso": "{:.2%}"
-        }))
-        print()
+def analisis_todas_semanas(df, universo_tickers, capital_inicial=10_000_000,
+                           benchmark="^STOXX50E", auto_adjust=True,
+                           fecha_valor=None):
+    semanal, _, _ = _calcular_atribucion(
+        df=df,
+        universo_tickers=universo_tickers,
+        capital_inicial=capital_inicial,
+        benchmark=benchmark,
+        fecha_valor=fecha_valor,
+        auto_adjust=auto_adjust,
+        guardar_detalle=False,
+    )
+
+    tabla = semanal[[
+        "Rent. cartera neta",
+        "Efecto mercado",
+        "Ef. selección",
+        "Ef. pesos",
+        "Costes",
+    ]].copy()
+
+    tabla["Alpha"] = (
+        tabla["Ef. selección"]
+        + tabla["Ef. pesos"]
+        + tabla["Costes"]
+    )
+
+    tabla = tabla.rename(columns={
+        "Rent. cartera neta": "Rent. cartera",
+        "Efecto mercado": "Rent. benchmark",
+        "Ef. selección": "Efecto selección",
+        "Ef. pesos": "Efecto pesos",
+        "Costes": "Efecto costes",
+    })
+
+    tabla = tabla[[
+        "Rent. cartera",
+        "Rent. benchmark",
+        "Alpha",
+        "Efecto selección",
+        "Efecto pesos",
+        "Efecto costes",
+    ]]
+
+    display(tabla.style.format({
+        "Rent. cartera": "{:.2%}",
+        "Rent. benchmark": "{:.2%}",
+        "Alpha": "{:.2%}",
+        "Efecto selección": "{:.2%}",
+        "Efecto pesos": "{:.2%}",
+        "Efecto costes": "{:.2%}",
+    }))
+
+    return tabla
         
 def generar_tabla_aciertos(df, universo_tickers):
     """
@@ -189,7 +488,7 @@ def generar_tabla_aciertos(df, universo_tickers):
         tabla_semana = analisis_semana(fecha_ini, fecha_fin, df, universo_tickers)
 
         # Extraer los tickers que fueron predichos (todas las filas excepto 'TOTAL')
-        tickers_predichos = tabla_semana.index[tabla_semana.index != "TOTAL"]
+        tickers_predichos = tabla_semana.index.difference(["TOTAL", "CASH"])
         # Mapear ticker -> si estuvo en top 15 (True/False)
         exito = {}
         for t in tickers_predichos:
@@ -217,16 +516,21 @@ def generar_tabla_aciertos(df, universo_tickers):
         
 def top_bottom_universo(fecha_ini, fecha_fin, df, universo_tickers, n=10):
     precios = yf.download(universo_tickers, start=fecha_ini - pd.Timedelta(days=7),
-                          end=fecha_fin + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"].ffill()
+                          end=fecha_fin + pd.Timedelta(days=1), auto_adjust=True, progress=False)["Close"].ffill()
 
     ret_universo = pd.Series({
         t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
         for t in universo_tickers if t in precios.columns
     }).sort_values(ascending=False)
 
-    cartera_ini = cartera(fecha_ini, df)
-    valor_total = sum(cartera_ini[t] * precios[t].asof(fecha_ini) for t in cartera_ini if t in precios.columns)
-    pesos = {t: (cartera_ini[t] * precios[t].asof(fecha_ini)) / valor_total for t in cartera_ini if t in precios.columns}
+    pos, cash = estado_cartera(fecha_ini, df, capital_inicial=10_000_000, incluir_costes=True)
+    nav_ini = cash + _valor_posicion(fecha_ini, pos, precios)
+
+    pesos = {
+        t: q * precios[t].asof(fecha_ini) / nav_ini
+        for t, q in pos.items()
+        if t in precios.columns and pd.notna(precios[t].asof(fecha_ini))
+    }
 
     def construir_tabla(serie):
         df_t = serie.reset_index()
@@ -256,7 +560,7 @@ def tabla_aciertos_semanales(df, universo_tickers):
     fechas_op = sorted(df["fecha"].unique())
     precios = yf.download(universo_tickers, start=fechas_op[0] - pd.Timedelta(days=7),
                           end=fechas_op[-1] + pd.Timedelta(days=7), 
-                          auto_adjust=False, progress=False)["Close"].ffill()
+                          auto_adjust=True, progress=False)["Close"].ffill()
     
     resultados = []
     for i in range(len(fechas_op) - 1):
@@ -334,7 +638,7 @@ def analisis_scores(scores_por_fecha, df, universo_tickers, ultimas_n=None):
     
     start = fechas_op[0] - pd.Timedelta(days=7)
     end = fechas_op[-1] + pd.Timedelta(days=7)
-    precios = yf.download(tickers, start=start, end=end, auto_adjust=False, progress=False)["Close"].ffill()
+    precios = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)["Close"].ffill()
 
     filas = []
     for i in range(len(fechas_op) - 1):
