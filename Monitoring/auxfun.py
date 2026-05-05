@@ -98,23 +98,60 @@ def calcular_cash_diario(df, capital_inicial=10_000_000, incluir_costes=True):
 
     return pd.Series(historial_cash)
 
-def valor_cartera_diario(df, capital_inicial=10_000_000, incluir_costes=True, auto_adjust=True):
-    '''Calcula el valor diario de la cartera usando precios de cierre de yfinance.'''
+def valor_cartera_diario(df, capital_inicial=10_000_000, incluir_costes=True, auto_adjust=False):
+    '''Calcula el valor diario de la cartera reconstruyendo las posiciones y sumando dividendos cobrados.'''
     df = df.copy()
     df["fecha"] = pd.to_datetime(df["fecha"])
 
     tickers = df["Ticker"].unique().tolist()
     start = df["fecha"].min()
-    end = df["fecha"].max() + pd.Timedelta(days=30)
+    end = pd.Timestamp.today() + pd.Timedelta(days=2)
 
-    precios = _descargar_precios(tickers, start, end, auto_adjust=auto_adjust)
+    # Forzamos auto_adjust=False y actions=True para obtener precios crudos y dividendos
+    datos = yf.download(tickers, start=start, end=end, actions=True, auto_adjust=False, progress=False)
+    
+    if len(tickers) == 1:
+        precios = datos['Close'].to_frame(tickers[0]).ffill()
+        dividendos = datos['Dividends'].to_frame(tickers[0]).fillna(0)
+    else:
+        precios = datos['Close'].ffill()
+        dividendos = datos['Dividends'][tickers].fillna(0)
 
-    historial = {}
-    for fecha in precios.index:
-        pos, cash = estado_cartera(fecha, df, capital_inicial, incluir_costes)
-        historial[fecha] = _nav(fecha, pos, cash, precios)
+    fechas_mercado = precios.index
+    posiciones = pd.DataFrame(0.0, index=fechas_mercado, columns=tickers)
+    flujos = pd.Series(0.0, index=fechas_mercado)
 
-    return pd.Series(historial)
+    for _, row in df.iterrows():
+        f_op = row['fecha']
+        t = row['Ticker']
+        acc = str(row['Accion']).strip().upper()
+        
+        if acc not in ["COMPRA", "VENTA"]: 
+            continue
+        
+        cant = float(row['Cantidad'])
+        px = float(row['Precio_Ejecutado']) if incluir_costes else float(row['Precio'])
+        
+        idx_fecha = fechas_mercado[fechas_mercado >= f_op]
+        if len(idx_fecha) == 0: continue
+        f_ap = idx_fecha[0]
+
+        if acc == 'COMPRA':
+            posiciones.loc[f_ap:, t] += cant
+            flujos.loc[f_ap] -= (cant * px)
+        elif acc == 'VENTA':
+            posiciones.loc[f_ap:, t] -= cant
+            flujos.loc[f_ap] += (cant * px)
+
+    # Cobro de dividendos (se tiene derecho si se poseía la acción al cierre del día anterior)
+    posiciones_ayer = posiciones.shift(1).fillna(0)
+    ingresos_divs = (posiciones_ayer * dividendos).sum(axis=1)
+
+    # NAV = Caja (con flujos y dividendos) + Valor de mercado de las acciones
+    cash_diario = capital_inicial + flujos.cumsum() + ingresos_divs.cumsum()
+    valor_acciones = (posiciones * precios[tickers]).sum(axis=1)
+
+    return cash_diario + valor_acciones
 
 def resumen_nav_desagregacion(df, universo_tickers, capital_inicial=10_000_000,
                               benchmark="^STOXX50E", fecha_valor=None,

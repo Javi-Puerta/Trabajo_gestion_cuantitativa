@@ -10,14 +10,16 @@ class ModeloBase(ABC):
     def train(self, df: pd.DataFrame, feature_cols: list[str]) -> None:
         """Entrena el modelo con los datos proporcionados, aplicando un grid search por el método
         de Walk-Forward cross validation."""
-        X = df[feature_cols]
-        y = df["Target"]
+        df_train = df.dropna(subset=["Target"]).copy() 
+        X = df_train[feature_cols]
+        y = df_train["Target"]
+        
         tscv = WalkForwardCV(n_splits=self.n_splits, val_ratio=0.20)
         grid = GridSearchCV(estimator=self.clf,
                             param_grid=self.param_grid,
                             cv=tscv,
                             scoring="roc_auc")
-        grid.fit(X, y, groups=df["Fecha"])
+        grid.fit(X, y, groups=df_train["Fecha"])
         self.clf = grid.best_estimator_
 
         fecha_min = df["Fecha"].min().date()

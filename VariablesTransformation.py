@@ -156,8 +156,8 @@ class FeatureEngineer:
         # 2) Si quedan NaNs puntuales (por ejemplo al inicio), rellenar con 0 como último recurso
         df[feat_present] = df[feat_present].fillna(0)
 
-        # 3) Eliminar filas sin Target (última fila de cada ticker o series incompletas)
-        df = df[df["Target"].notna()].copy()
+        # 3) Eliminar SOLO las filas que no tengan las features calculadas.
+        df = df.dropna(subset=self.feature_cols).copy()
 
         # 4) Limpiar columnas auxiliares que no queremos devolver
         cols_to_drop = ["Retorno_Next_Week", "Ret_3m_activo", "Ret_3m_ind"]
