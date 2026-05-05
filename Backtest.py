@@ -32,17 +32,29 @@ class BacktestEngine:
         if dias_hasta_viernes > 0:
             self.start_date += pd.DateOffset(days=dias_hasta_viernes)
 
-        all_tickers = self.universo.get_full_ticker_list()
-        self.costes = calcular_costes(all_tickers) # Costes de transacción por ticker (estáticos)
+        tickers_invertibles = self.universo.get_full_ticker_list()
+        all_tickers = sorted(set(tickers_invertibles) | {self.fe.ticker_indice})
+        self.costes = calcular_costes(tickers_invertibles)
+
         data_start_date = self.start_date - pd.DateOffset(years=self.len_ventana + 1)
         self.df_daily = proveedor.download_prices_daily(all_tickers, data_start_date, end_date)
         df_weekly   = proveedor.download_prices_weekly(all_tickers, data_start_date, end_date)
         self.df = self.fe.build(df_weekly, self.df_daily) # Df con toda la informacion necesaria para cada fecha y ticker
         
     def _train(self, fecha_pivote: pd.Timestamp, tickers_validos: set) -> bool:
-        fecha_inicio = fecha_pivote - pd.DateOffset(years=self.len_ventana)
-        train_data = self.df[(self.df["Fecha"] >= fecha_inicio) & (self.df["Fecha"] < fecha_pivote)]
-        train_daily = self.df_daily[(self.df_daily["Fecha"] >= fecha_inicio) & (self.df_daily["Fecha"] < fecha_pivote)]
+        fecha_corte = fecha_pivote - pd.Timedelta(weeks=2)
+        fecha_inicio = fecha_corte - pd.DateOffset(years=self.len_ventana)
+
+        train_data = self.df[
+            (self.df["Fecha"] >= fecha_inicio)
+            & (self.df["Fecha"] <= fecha_corte)
+            & (self.df["Ticker"].isin(tickers_validos))
+        ].copy()
+
+        train_daily = self.df_daily[
+            (self.df_daily["Fecha"] >= fecha_inicio)
+            & (self.df_daily["Fecha"] <= fecha_corte)
+        ].copy()
 
         return self.estrategia.train(train_data, self.fe.feature_cols, tickers_validos, train_daily)
 
@@ -147,7 +159,7 @@ class BacktestEngine:
                     continue
 
                 # La estrategia decide el reajuste de pesos. Actualizamos la cartera y los pesos
-                datos_features_hoy = self.df[self.df["Fecha"] == fecha_hoy].copy()
+                datos_features_hoy = self.df[(self.df["Fecha"] == fecha_hoy) & (self.df["Ticker"].isin(tickers_hoy))].copy()
                 pesos_nuevos = self.estrategia.seleccionar(datos_features_hoy, self.fe.feature_cols, cartera, self.df_daily)
                 print(f"{fecha_hoy.date()} | VP={self.VP:.0f} | pesos={pesos_nuevos}")
                 cartera, pesos, self.VP = self._ajustar_cartera(cartera, datos_hoy, pesos_nuevos)

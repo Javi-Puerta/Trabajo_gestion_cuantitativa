@@ -22,7 +22,6 @@ def _descargar_precios(tickers, start, end, auto_adjust=True):
 
     return precios
 
-
 def _valor_posicion(fecha, pos, precios):
     return sum(
         q * precios[t].asof(fecha)
@@ -203,7 +202,12 @@ def _calcular_atribucion(df, universo_tickers, capital_inicial=10_000_000,
 
         ops = df[df["fecha"].eq(f0)]
         cash_sin_coste = cash
-        coste_eur = (ops["Cantidad"] * (ops["Precio_Ejecutado"] - ops["Precio"]).abs()).sum()
+        coste_por_ticker = (
+            ops.assign(_coste=ops["Cantidad"] * (ops["Precio_Ejecutado"] - ops["Precio"]).abs())
+            .groupby("Ticker")["_coste"].sum()
+        )
+
+        coste_eur = coste_por_ticker.sum()
 
         for r in ops.itertuples():
             if r.Accion == "MANTENER":
@@ -231,6 +235,7 @@ def _calcular_atribucion(df, universo_tickers, capital_inicial=10_000_000,
         seleccion = peso = ret_bruta = 0.0
         filas = []
 
+        tickers_con_fila = set()
         for t, q in pos.items():
             if t not in precios.columns:
                 continue
@@ -250,14 +255,42 @@ def _calcular_atribucion(df, universo_tickers, capital_inicial=10_000_000,
             seleccion += ef_sel
             peso += ef_peso
 
+            ef_coste = -coste_por_ticker.get(t, 0.0) / nav0
+            ef_mercado = w * r_bmk
+            rent_cartera = w * r + ef_coste
+            alpha = ef_sel + ef_peso + ef_coste
+
+            pnl_bruto = q * (p1 - p0)
+            coste_ticker = coste_por_ticker.get(t, 0.0)
+
+            tickers_con_fila.add(t)
             filas.append({
                 "Ticker": t,
                 "Peso": w,
                 "Retorno": r,
-                "P&L bruto (€)": q * (p1 - p0),
-                "Ef. Selección": ef_sel,
-                "Ef. Peso": ef_peso,
+                "P&L bruto (€)": pnl_bruto,
+                "Beneficio/Pérdida neta (€)": pnl_bruto - coste_ticker,
+                "Efecto mercado (€)": nav0 * ef_mercado,
+                "Alpha (€)": nav0 * alpha,
+                "Efecto selección (€)": nav0 * ef_sel,
+                "Efecto pesos (€)": nav0 * ef_peso,
+                "Efecto costes (€)": -coste_ticker,
             })
+            
+        for t, c in coste_por_ticker.items():
+            if t not in tickers_con_fila and c != 0:
+                filas.append({
+                    "Ticker": t,
+                    "Peso": 0.0,
+                    "Retorno": 0.0,
+                    "P&L bruto (€)": 0.0,
+                    "Beneficio/Pérdida neta (€)": -c,
+                    "Efecto mercado (€)": 0.0,
+                    "Alpha (€)": -c,
+                    "Efecto selección (€)": 0.0,
+                    "Efecto pesos (€)": 0.0,
+                    "Efecto costes (€)": -c,
+                })
 
         peso += (cash_sin_coste / nav0) * (-r_bmk)
         ret_neta = r_bmk + seleccion + peso - coste
@@ -285,16 +318,24 @@ def _calcular_atribucion(df, universo_tickers, capital_inicial=10_000_000,
     semanal = pd.DataFrame(resumen).set_index("Periodo")
 
     nav = cash + valor_pos(fecha_valor)
+    resultado_nav = nav - capital_inicial
+    seleccion_eur = semanal["Selección (€)"].sum()
+    pesos_eur = semanal["Pesos (€)"].sum()
+    costes_eur = semanal["Costes (€)"].sum()
+    alpha_eur = seleccion_eur + pesos_eur + costes_eur
+    mercado_eur = resultado_nav - alpha_eur
+
     final = pd.Series({
         "Fecha valoración": fecha_valor.date(),
         "NAV": nav,
         "NAV normalizado": nav / capital_inicial,
         "Rentabilidad NAV": nav / capital_inicial - 1,
-        "Efecto mercado (€)": semanal["Mercado (€)"].sum(),
-        "Ef. selección (€)": semanal["Selección (€)"].sum(),
-        "Ef. pesos (€)": semanal["Pesos (€)"].sum(),
-        "Costes (€)": semanal["Costes (€)"].sum(),
-        "Resultado NAV (€)": nav - capital_inicial,
+        "Resultado NAV (€)": resultado_nav,
+        "Efecto mercado (€)": mercado_eur,
+        "Alpha (€)": alpha_eur,
+        "Ef. selección (€)": seleccion_eur,
+        "Ef. pesos (€)": pesos_eur,
+        "Costes (€)": costes_eur,
     })
 
     final["Check NAV (€)"] = (
@@ -411,58 +452,64 @@ def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers,
     return df_resultado
 
 
-def analisis_todas_semanas(df, universo_tickers, capital_inicial=10_000_000,
-                           benchmark="^STOXX50E", auto_adjust=True,
-                           fecha_valor=None):
-    semanal, _, _ = _calcular_atribucion(
-        df=df,
-        universo_tickers=universo_tickers,
-        capital_inicial=capital_inicial,
-        benchmark=benchmark,
-        fecha_valor=fecha_valor,
+def analisis_todas_semanas(df, universo_tickers=None, capital_inicial=10_000_000,
+                           auto_adjust=True, fecha_valor=None):
+    df = df.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"])
+    fecha_valor = pd.Timestamp.today().normalize() if fecha_valor is None else pd.Timestamp(fecha_valor)
+
+    ops = df[
+        (df["fecha"] <= fecha_valor)
+        & (df["Accion"].str.upper().isin(["COMPRA", "VENTA"]))
+    ].copy()
+
+    tickers = ops["Ticker"].unique().tolist()
+    precios = _descargar_precios(
+        tickers,
+        ops["fecha"].min(),
+        fecha_valor + pd.Timedelta(days=2),
         auto_adjust=auto_adjust,
-        guardar_detalle=False,
     )
 
-    tabla = semanal[[
-        "Rent. cartera neta",
-        "Efecto mercado",
-        "Ef. selección",
-        "Ef. pesos",
-        "Costes",
-    ]].copy()
+    fecha_valor = precios.index[precios.index <= fecha_valor].max()
 
-    tabla["Alpha"] = (
-        tabla["Ef. selección"]
-        + tabla["Ef. pesos"]
-        + tabla["Costes"]
+    signo = np.where(ops["Accion"].str.upper().eq("COMPRA"), -1, 1)
+    ops["Flujo neto (€)"] = signo * ops["Cantidad"] * ops["Precio_Ejecutado"]
+    ops["Flujo bruto (€)"] = signo * ops["Cantidad"] * ops["Precio"]
+
+    tabla = ops.groupby("Ticker")[["Flujo neto (€)", "Flujo bruto (€)"]].sum()
+
+    pos_final, cash_final = estado_cartera(
+        fecha_valor,
+        df,
+        capital_inicial=capital_inicial,
+        incluir_costes=True,
     )
 
-    tabla = tabla.rename(columns={
-        "Rent. cartera neta": "Rent. cartera",
-        "Efecto mercado": "Rent. benchmark",
-        "Ef. selección": "Efecto selección",
-        "Ef. pesos": "Efecto pesos",
-        "Costes": "Efecto costes",
-    })
+    valor_final = {
+        t: q * precios[t].asof(fecha_valor)
+        for t, q in pos_final.items()
+        if t in precios.columns and pd.notna(precios[t].asof(fecha_valor))
+    }
+
+    tabla["Valor final posición (€)"] = pd.Series(valor_final)
+    tabla["Valor final posición (€)"] = tabla["Valor final posición (€)"].fillna(0)
+
+    tabla["P&L neto (€)"] = tabla["Flujo neto (€)"] + tabla["Valor final posición (€)"]
+    tabla["P&L bruto (€)"] = tabla["Flujo bruto (€)"] + tabla["Valor final posición (€)"]
+    tabla["Efecto costes (€)"] = tabla["P&L neto (€)"] - tabla["P&L bruto (€)"]
 
     tabla = tabla[[
-        "Rent. cartera",
-        "Rent. benchmark",
-        "Alpha",
-        "Efecto selección",
-        "Efecto pesos",
-        "Efecto costes",
-    ]]
+        "P&L neto (€)",
+        "P&L bruto (€)",
+        "Efecto costes (€)",
+        "Valor final posición (€)",
+        "Flujo neto (€)",
+    ]].sort_values("P&L neto (€)", ascending=False)
 
-    display(tabla.style.format({
-        "Rent. cartera": "{:.2%}",
-        "Rent. benchmark": "{:.2%}",
-        "Alpha": "{:.2%}",
-        "Efecto selección": "{:.2%}",
-        "Efecto pesos": "{:.2%}",
-        "Efecto costes": "{:.2%}",
-    }))
+    nav = cash_final + sum(valor_final.values())
+    tabla.loc["TOTAL"] = tabla.sum()
+    tabla.loc["TOTAL", "Diferencia vs NAV (€)"] = tabla.loc["TOTAL", "P&L neto (€)"] - (nav - capital_inicial)
 
     return tabla
         

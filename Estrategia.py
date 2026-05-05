@@ -119,7 +119,7 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
         cov   = ret.cov().values
 
         best_sharpe, best_pesos = -np.inf, np.ones(n) / n
-        rng = np.random.default_rng(seed=None)
+        rng = np.random.default_rng(seed=42)
         for _ in range(self.n_simulaciones):
             raw   = rng.dirichlet(np.ones(n))
             pesos = self.peso_min + (1 - n * self.peso_min) * raw

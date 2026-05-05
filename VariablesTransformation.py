@@ -25,7 +25,7 @@ class FeatureEngineer:
         df = df_daily.copy().sort_values(["Ticker", "Fecha"])
         df["Fecha"] = pd.to_datetime(df["Fecha"])
 
-        # RSI (solo 14)
+        # RSI (solo 14) 
         df["RSI_14"] = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_rsi(x, 14))
 
         # MACD
@@ -148,10 +148,10 @@ class FeatureEngineer:
             "Log_Precio_Boll_Upper", "Log_Precio_Boll_Lower",
         ]
 
-        # 1) Imputación por mediana por ticker para conservar filas
+        # 1) Imputación arrastrando el último valor conocido (forward fill) para evitar mirar al futuro
         feat_present = [c for c in self.feature_cols if c in df.columns]
         if feat_present:
-            df[feat_present] = df.groupby("Ticker")[feat_present].transform(lambda g: g.fillna(g.median()))
+            df[feat_present] = df.groupby("Ticker")[feat_present].transform(lambda g: g.ffill())
 
         # 2) Si quedan NaNs puntuales (por ejemplo al inicio), rellenar con 0 como último recurso
         df[feat_present] = df[feat_present].fillna(0)

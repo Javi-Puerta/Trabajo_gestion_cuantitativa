@@ -28,9 +28,9 @@ class ProveedorDatosBase(ABC):
 class YFinanceProvider(ProveedorDatosBase):
     def download_prices_daily(self, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
         data = yf.download(tickers, start=start_date, end=end_date,
-                interval="1d", auto_adjust=True, progress=False)
+                interval="1d", auto_adjust=False, progress=False)
 
-        precios = data["Close"].stack().reset_index()
+        precios = data["Adj Close"].stack().reset_index()
         precios.columns = ["Fecha", "Ticker", "Precio_Close"]
 
         volumenes = data["Volume"].stack().reset_index()
