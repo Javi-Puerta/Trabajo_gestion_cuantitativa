@@ -1,900 +1,635 @@
 import pandas as pd
 import yfinance as yf
+import unicodedata
 import numpy as np
-from IPython.display import display
+import requests
+from io import StringIO
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
-import pickle
-import sys
-sys.path.append("../")
-from ProveedorDatos import YFinanceProvider
-from VariablesTransformation import FeatureEngineer
-from UniversoActivos import UniversoActivosEstatico
+def get_eurostoxx50_tickers():
+    url = 'https://en.wikipedia.org/wiki/EURO_STOXX_50'
+    headers = {"User-Agent": "Mozilla/5.0 ..."}
+    response = requests.get(url, headers=headers, timeout=20)
+    response.raise_for_status()
 
-def _descargar_precios(tickers, start, end, auto_adjust=True):
-    tickers = list(dict.fromkeys(tickers))
-    precios = yf.download(
-        tickers, start=start, end=end,
-        auto_adjust=auto_adjust, progress=False
-    )["Close"].ffill()
+    tables = pd.read_html(StringIO(response.text), flavor='bs4')
+    df = next(t for t in tables if 'Ticker' in t.columns)
+    return df['Ticker'].tolist()
 
-    if isinstance(precios, pd.Series):
-        precios = precios.to_frame(tickers[0])
 
-    return precios
+def _limpiar_col(c):
+    c = unicodedata.normalize("NFKD", str(c))
+    c = "".join(x for x in c if not unicodedata.combining(x))
+    return c.lower().strip().replace(" ", "_")
 
-def _valor_posicion(fecha, pos, precios):
-    return sum(
-        q * precios[t].asof(fecha)
-        for t, q in pos.items()
-        if t in precios.columns and pd.notna(precios[t].asof(fecha))
+
+def _leer_operaciones(archivo, fecha_fin=None, hoja="Operativa", incluir_costes=True):
+    ops = pd.read_excel(archivo, sheet_name=hoja) if str(archivo).endswith((".xlsx", ".xls")) else pd.read_csv(archivo)
+
+    ops.columns = [_limpiar_col(c) for c in ops.columns]
+    ops = ops.rename(columns={"id": "ticker"})
+
+    ops["fecha"] = pd.to_datetime(ops["fecha"], dayfirst=True)
+    ops["accion"] = ops["accion"].astype(str).str.upper().str.strip()
+
+    ops = ops[
+        ops["accion"].isin(["COMPRA", "VENTA"])
+        & ops["ticker"].notna()
+    ].copy()
+
+    ops["ticker"] = ops["ticker"].astype(str).str.strip()
+    ops = ops[~ops["ticker"].isin(["CASH", "nan", "NaN", ""])].copy()
+
+    fecha_fin = pd.Timestamp.today().normalize() if fecha_fin is None else pd.to_datetime(fecha_fin, dayfirst=True).normalize()
+    ops = ops[ops["fecha"] <= fecha_fin].copy()
+
+    if ops.empty:
+        raise ValueError(f"No hay compras/ventas hasta {fecha_fin.date()}.")
+
+    if "precio_ejecutado" not in ops:
+        ops["precio_ejecutado"] = ops["precio"]
+
+    if not incluir_costes:
+        ops["precio_ejecutado"] = ops["precio"]
+
+    for c in ["cantidad", "precio", "precio_ejecutado"]:
+        ops[c] = pd.to_numeric(ops[c], errors="coerce")
+
+    return ops.sort_values("fecha").reset_index(drop=True), fecha_fin
+
+
+def _campo_yf(datos, campo, tickers):
+    if isinstance(datos.columns, pd.MultiIndex):
+        if campo in datos.columns.get_level_values(0):
+            out = datos[campo]
+        elif campo in datos.columns.get_level_values(1):
+            out = datos.xs(campo, axis=1, level=1)
+        else:
+            out = pd.DataFrame(0.0, index=datos.index, columns=tickers)
+    else:
+        out = datos[campo].to_frame(tickers[0]) if campo in datos else pd.DataFrame(0.0, index=datos.index, columns=tickers)
+
+    return out.reindex(columns=tickers)
+
+
+def _datos_mercado(ops, fecha_fin, universo_tickers=()):
+    tickers = sorted(set(ops["ticker"]) | set(universo_tickers))
+    start = ops["fecha"].min()
+    end = fecha_fin + pd.Timedelta(days=2)
+
+    if start >= end:
+        raise ValueError(f"Fechas inválidas: start={start.date()} >= end={end.date()}")
+
+    datos = yf.download(
+        tickers,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        actions=True,
+        auto_adjust=False,
+        progress=False,
     )
 
+    precios = _campo_yf(datos, "Close", tickers).ffill()
+    dividendos = _campo_yf(datos, "Dividends", tickers).reindex(precios.index).fillna(0.0)
 
-def estado_cartera(fecha, df, capital_inicial=10_000_000, incluir_costes=True):
-    df = df.copy()
-    df["fecha"] = pd.to_datetime(df["fecha"])
-    ops = df[df["fecha"] <= pd.Timestamp(fecha)].sort_values("fecha")
+    if precios.empty:
+        raise ValueError("yfinance no ha devuelto precios.")
 
-    pos, cash = {}, float(capital_inicial)
+    def siguiente_sesion(f):
+        validas = precios.index[precios.index >= f]
+        return validas[0] if len(validas) else pd.NaT
+
+    ops = ops.copy()
+    ops["fecha_trade"] = ops["fecha"].apply(siguiente_sesion)
+    ops = ops.dropna(subset=["fecha_trade"])
 
     for r in ops.itertuples():
-        accion = str(r.Accion).upper()
+        precios.loc[r.fecha_trade, r.ticker] = r.precio
 
-        if accion == "MANTENER":
-            continue
-        if accion not in {"COMPRA", "VENTA"}:
-            continue
+    precios = precios.ffill()
 
-        precio = r.Precio_Ejecutado if incluir_costes else r.Precio
-
-        if accion == "COMPRA":
-            pos[r.Ticker] = pos.get(r.Ticker, 0.0) + r.Cantidad
-            cash -= r.Cantidad * precio
-        else:
-            pos[r.Ticker] = pos.get(r.Ticker, 0.0) - r.Cantidad
-            cash += r.Cantidad * precio
-
-    pos = {t: q for t, q in pos.items() if q != 0}
-    return pos, cash
+    return precios, dividendos, ops
 
 
-def _nav(fecha, pos, cash, precios):
-    return cash + _valor_posicion(fecha, pos, precios)
+def historico_valor_cartera(archivo, fecha_fin=None, capital_inicial=10_000_000,
+                            hoja="Operativa", incluir_costes=True):
 
-def cartera(fecha, df):
-    '''Devuelve un diccionario con los componentes de la cartera en una fecha dada.'''
-    pos, _ = estado_cartera(
-        fecha=fecha,
-        df=df,
-        capital_inicial=0,
-        incluir_costes=False
-    )
-    return pos
+    ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
+    precios, dividendos, ops = _datos_mercado(ops, fecha_fin)
 
-def calcular_cash_diario(df, capital_inicial=10_000_000, incluir_costes=True):
-    df = df.copy()
-    df["fecha"] = pd.to_datetime(df["fecha"])
+    posiciones = pd.DataFrame(0.0, index=precios.index, columns=precios.columns)
+    flujos = pd.Series(0.0, index=precios.index)
 
+    for r in ops.itertuples():
+        signo = 1 if r.accion == "COMPRA" else -1
+        cantidad = abs(float(r.cantidad))
+
+        posiciones.loc[r.fecha_trade:, r.ticker] += signo * cantidad
+        flujos.loc[r.fecha_trade] -= signo * cantidad * float(r.precio_ejecutado)
+
+    dividendos_diarios = (posiciones.shift(1).fillna(0.0) * dividendos).sum(axis=1)
+    cash = capital_inicial + flujos.cumsum() + dividendos_diarios.cumsum()
+    valor_acciones = (posiciones * precios).sum(axis=1)
+    valor_cartera = cash + valor_acciones
+
+    return pd.DataFrame({
+        "Cash": cash,
+        "Valor acciones": valor_acciones,
+        "Dividendos diarios": dividendos_diarios,
+        "Valor cartera": valor_cartera,
+        "Rentabilidad diaria": valor_cartera.pct_change().fillna(0.0),
+    })
+
+
+def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
+                             capital_inicial=10_000_000, hoja="Operativa",
+                             incluir_costes=True):
+
+    ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
+    precios, dividendos, ops = _datos_mercado(ops, fecha_fin, universo_tickers)
+
+    fecha_valor = precios.index[precios.index <= fecha_fin].max()
+    fechas_op = sorted(f for f in ops["fecha_trade"].unique() if f <= fecha_valor)
+
+    pos = {}
     cash = float(capital_inicial)
-    historial_cash = {}
+    filas = []
 
-    for fecha, grupo in df.sort_values("fecha").groupby("fecha"):
-        for r in grupo.itertuples():
-            accion = str(r.Accion).upper()
-
-            if accion == "MANTENER":
-                continue
-            if accion not in {"COMPRA", "VENTA"}:
-                continue
-
-            precio = r.Precio_Ejecutado if incluir_costes else r.Precio
-
-            if accion == "COMPRA":
-                cash -= r.Cantidad * precio
-            else:
-                cash += r.Cantidad * precio
-
-        historial_cash[fecha] = cash
-
-    return pd.Series(historial_cash)
-
-def valor_cartera_diario(df, capital_inicial=10_000_000, incluir_costes=True, auto_adjust=False):
-    '''Calcula el valor diario de la cartera reconstruyendo las posiciones y sumando dividendos cobrados.'''
-    df = df.copy()
-    df["fecha"] = pd.to_datetime(df["fecha"])
-
-    tickers = df["Ticker"].unique().tolist()
-    start = df["fecha"].min()
-    end = pd.Timestamp.today() + pd.Timedelta(days=2)
-
-    # Forzamos auto_adjust=False y actions=True para obtener precios crudos y dividendos
-    datos = yf.download(tickers, start=start, end=end, actions=True, auto_adjust=False, progress=False)
-    
-    if len(tickers) == 1:
-        precios = datos['Close'].to_frame(tickers[0]).ffill()
-        dividendos = datos['Dividends'].to_frame(tickers[0]).fillna(0)
-    else:
-        precios = datos['Close'].ffill()
-        dividendos = datos['Dividends'][tickers].fillna(0)
-
-    fechas_mercado = precios.index
-    posiciones = pd.DataFrame(0.0, index=fechas_mercado, columns=tickers)
-    flujos = pd.Series(0.0, index=fechas_mercado)
-
-    for _, row in df.iterrows():
-        f_op = row['fecha']
-        t = row['Ticker']
-        acc = str(row['Accion']).strip().upper()
-        
-        if acc not in ["COMPRA", "VENTA"]: 
-            continue
-        
-        cant = float(row['Cantidad'])
-        px = float(row['Precio_Ejecutado']) if incluir_costes else float(row['Precio'])
-        
-        idx_fecha = fechas_mercado[fechas_mercado >= f_op]
-        if len(idx_fecha) == 0: continue
-        f_ap = idx_fecha[0]
-
-        if acc == 'COMPRA':
-            posiciones.loc[f_ap:, t] += cant
-            flujos.loc[f_ap] -= (cant * px)
-        elif acc == 'VENTA':
-            posiciones.loc[f_ap:, t] -= cant
-            flujos.loc[f_ap] += (cant * px)
-
-    # Cobro de dividendos (se tiene derecho si se poseía la acción al cierre del día anterior)
-    posiciones_ayer = posiciones.shift(1).fillna(0)
-    ingresos_divs = (posiciones_ayer * dividendos).sum(axis=1)
-
-    # NAV = Caja (con flujos y dividendos) + Valor de mercado de las acciones
-    cash_diario = capital_inicial + flujos.cumsum() + ingresos_divs.cumsum()
-    valor_acciones = (posiciones * precios[tickers]).sum(axis=1)
-
-    return cash_diario + valor_acciones
-
-def resumen_nav_desagregacion(df, universo_tickers, capital_inicial=10_000_000,
-                              benchmark="^STOXX50E", fecha_valor=None,
-                              auto_adjust=True):
-    _, _, final = _calcular_atribucion(
-        df, universo_tickers, capital_inicial, benchmark, fecha_valor, auto_adjust
-    )
-    return final
-
-def rentabilidad_semanal_por_periodo(df, capital_inicial=10_000_000,
-                                     incluir_costes=True, auto_adjust=True):
-    '''Calcula la rentabilidad de la cartera y el STOXX50 entre cada fecha de operación.'''
-    df = df.copy()
-    df["fecha"] = pd.to_datetime(df["fecha"])
-
-    fechas_op = sorted(df["fecha"].unique())
-    tickers = df["Ticker"].unique().tolist()
-
-    start = fechas_op[0] - pd.Timedelta(days=7)
-    end = fechas_op[-1] + pd.Timedelta(days=7)
-
-    precios = _descargar_precios(tickers, start, end, auto_adjust=auto_adjust)
-    stoxx = yf.download(
-        "^STOXX50E", start=start, end=end,
-        auto_adjust=auto_adjust, progress=False
-    )["Close"].squeeze().ffill()
-
-    resultados = []
-
-    for fecha_ini, fecha_fin in zip(fechas_op[:-1], fechas_op[1:]):
-        pos, cash = estado_cartera(fecha_ini, df, capital_inicial, incluir_costes)
-
-        nav_ini = _nav(fecha_ini, pos, cash, precios)
-        nav_fin = _nav(fecha_fin, pos, cash, precios)
-
-        if nav_ini == 0 or pd.isna(nav_ini) or pd.isna(nav_fin):
-            continue
-
-        ret_cartera = nav_fin / nav_ini - 1
-        ret_stoxx = stoxx.asof(fecha_fin) / stoxx.asof(fecha_ini) - 1
-
-        resultados.append({
-            "Periodo": f"{fecha_ini.date()} → {fecha_fin.date()}",
-            "Ret. Cartera": ret_cartera,
-            "Ret. STOXX50": ret_stoxx,
-            "Alpha": ret_cartera - ret_stoxx
-        })
-
-    return pd.DataFrame(resultados).set_index("Periodo")
-
-def _calcular_atribucion(df, universo_tickers, capital_inicial=10_000_000,
-                         benchmark="^STOXX50E", fecha_valor=None,
-                         auto_adjust=True, guardar_detalle=False):
-    df = df.copy()
-    df["fecha"] = pd.to_datetime(df["fecha"])
-    fecha_valor = pd.Timestamp.today().normalize() if fecha_valor is None else pd.Timestamp(fecha_valor)
-
-    fechas_op = sorted(df.loc[df["fecha"] <= fecha_valor, "fecha"].unique())
-    tickers = sorted(set(df["Ticker"]) | set(universo_tickers))
-    start, end = fechas_op[0] - pd.Timedelta(days=7), fecha_valor + pd.Timedelta(days=2)
-
-    precios = yf.download(tickers, start=start, end=end,
-                          auto_adjust=auto_adjust, progress=False)["Close"].ffill()
-    if isinstance(precios, pd.Series):
-        precios = precios.to_frame(tickers[0])
-
-    bmk = yf.download(benchmark, start=start, end=end,
-                      auto_adjust=auto_adjust, progress=False)["Close"].squeeze().ffill()
-
-    fecha_valor = precios.index[precios.index <= fecha_valor].max()
-    w_bmk = 1 / len(universo_tickers)
-
-    pos, cash = {}, capital_inicial
-    resumen, detalles = [], {}
-
-    def valor_pos(fecha):
+    def valor_posicion(fecha):
         return sum(
-            q * precios[t].asof(fecha)
+            q * precios.loc[fecha, t]
             for t, q in pos.items()
-            if t in precios.columns and pd.notna(precios[t].asof(fecha))
+            if t in precios.columns and pd.notna(precios.loc[fecha, t])
         )
+
+    def retorno_total(t, f0, f1, divs):
+        p0, p1 = precios.loc[f0, t], precios.loc[f1, t]
+        if pd.isna(p0) or pd.isna(p1) or p0 == 0:
+            return np.nan
+        return (p1 + divs[t].sum()) / p0 - 1
 
     for i, f0 in enumerate(fechas_op):
         f1 = fechas_op[i + 1] if i + 1 < len(fechas_op) else fecha_valor
+        nav0 = cash + valor_posicion(f0)
 
-        ops = df[df["fecha"].eq(f0)]
-        cash_sin_coste = cash
-        coste_por_ticker = (
-            ops.assign(_coste=ops["Cantidad"] * (ops["Precio_Ejecutado"] - ops["Precio"]).abs())
-            .groupby("Ticker")["_coste"].sum()
-        )
-
-        coste_eur = coste_por_ticker.sum()
-
-        for r in ops.itertuples():
-            if r.Accion == "MANTENER":
-                continue
-
-            signo = 1 if r.Accion == "COMPRA" else -1
-            pos[r.Ticker] = pos.get(r.Ticker, 0) + signo * r.Cantidad
-
-            if r.Accion == "COMPRA":
-                cash_sin_coste -= r.Cantidad * r.Precio
-                cash -= r.Cantidad * r.Precio_Ejecutado
-            else:
-                cash_sin_coste += r.Cantidad * r.Precio
-                cash += r.Cantidad * r.Precio_Ejecutado
-
-        pos = {t: q for t, q in pos.items() if q != 0}
-
-        nav0 = cash + valor_pos(f0)
-
-        if nav0 <= 0:
+        if nav0 <= 0 or pd.isna(nav0):
             continue
 
-        r_bmk = 0 if f1 == f0 else bmk.asof(f1) / bmk.asof(f0) - 1
-        coste = coste_eur / nav0
-        seleccion = peso = ret_bruta = 0.0
-        filas = []
+        cash_sin_costes = cash
 
-        tickers_con_fila = set()
+        for r in ops[ops["fecha_trade"].eq(f0)].itertuples():
+            signo = 1 if r.accion == "COMPRA" else -1
+            cantidad = abs(float(r.cantidad))
+
+            pos[r.ticker] = pos.get(r.ticker, 0.0) + signo * cantidad
+            cash_sin_costes -= signo * cantidad * float(r.precio)
+            cash -= signo * cantidad * float(r.precio_ejecutado)
+
+        pos = {t: q for t, q in pos.items() if abs(q) > 1e-12}
+
+        coste_eur = cash_sin_costes - cash
+        coste = -coste_eur / nav0
+
+        divs = dividendos.loc[(dividendos.index > f0) & (dividendos.index <= f1)]
+
+        ret_universo = pd.Series({
+            t: retorno_total(t, f0, f1, divs)
+            for t in universo_tickers
+            if t in precios.columns
+        }).dropna()
+
+        r_bmk = float(ret_universo.mean()) if len(ret_universo) else 0.0
+        w_bmk = 1 / len(ret_universo) if len(ret_universo) else 0.0
+
+        seleccion = 0.0
+        pesos = 0.0
+
         for t, q in pos.items():
             if t not in precios.columns:
                 continue
 
-            p0, p1 = precios[t].asof(f0), precios[t].asof(f1)
-            if pd.isna(p0) or pd.isna(p1) or p0 == 0:
+            r = retorno_total(t, f0, f1, divs)
+            p0 = precios.loc[f0, t]
+
+            if pd.isna(r) or pd.isna(p0):
                 continue
 
-            r = 0 if f1 == f0 else p1 / p0 - 1
             w = q * p0 / nav0
+            b = w_bmk if t in ret_universo.index else 0.0
             exceso = r - r_bmk
 
-            ef_sel = w_bmk * exceso
-            ef_peso = (w - w_bmk) * exceso
+            seleccion += b * exceso
+            pesos += (w - b) * exceso
 
-            ret_bruta += w * r
-            seleccion += ef_sel
-            peso += ef_peso
+        peso_cash = cash_sin_costes / nav0
+        pesos += peso_cash * (0.0 - r_bmk)
 
-            ef_coste = -coste_por_ticker.get(t, 0.0) / nav0
-            ef_mercado = w * r_bmk
-            rent_cartera = w * r + ef_coste
-            alpha = ef_sel + ef_peso + ef_coste
+        divs_eur = sum(q * divs[t].sum() for t, q in pos.items() if t in divs.columns)
 
-            pnl_bruto = q * (p1 - p0)
-            coste_ticker = coste_por_ticker.get(t, 0.0)
+        nav1 = cash + divs_eur + valor_posicion(f1)
+        r_cartera = nav1 / nav0 - 1
 
-            tickers_con_fila.add(t)
-            filas.append({
-                "Ticker": t,
-                "Peso": w,
-                "Retorno": r,
-                "P&L bruto (€)": pnl_bruto,
-                "Beneficio/Pérdida neta (€)": pnl_bruto - coste_ticker,
-                "Efecto mercado (€)": nav0 * ef_mercado,
-                "Alpha (€)": nav0 * alpha,
-                "Efecto selección (€)": nav0 * ef_sel,
-                "Efecto pesos (€)": nav0 * ef_peso,
-                "Efecto costes (€)": -coste_ticker,
-            })
-            
-        for t, c in coste_por_ticker.items():
-            if t not in tickers_con_fila and c != 0:
-                filas.append({
-                    "Ticker": t,
-                    "Peso": 0.0,
-                    "Retorno": 0.0,
-                    "P&L bruto (€)": 0.0,
-                    "Beneficio/Pérdida neta (€)": -c,
-                    "Efecto mercado (€)": 0.0,
-                    "Alpha (€)": -c,
-                    "Efecto selección (€)": 0.0,
-                    "Efecto pesos (€)": 0.0,
-                    "Efecto costes (€)": -c,
-                })
-
-        peso += (cash_sin_coste / nav0) * (-r_bmk)
-        ret_neta = r_bmk + seleccion + peso - coste
-
-        periodo = f"{pd.Timestamp(f0).date()} → {pd.Timestamp(f1).date()}"
-        resumen.append({
-            "Periodo": periodo,
+        filas.append({
+            "Periodo": f"{pd.Timestamp(f0).date()} → {pd.Timestamp(f1).date()}",
             "NAV inicial": nav0,
-            "Rent. cartera neta": ret_neta,
-            "Efecto mercado": r_bmk,
+            "NAV final": nav1,
+            "Rent. cartera neta": r_cartera,
+            "Rent. BMK EW": r_bmk,
+            "Alpha": r_cartera - r_bmk,
             "Ef. selección": seleccion,
-            "Ef. pesos": peso,
-            "Costes": -coste,
-            "Resultado neto (€)": nav0 * ret_neta,
-            "Mercado (€)": nav0 * r_bmk,
-            "Selección (€)": nav0 * seleccion,
-            "Pesos (€)": nav0 * peso,
+            "Ef. pesos": pesos,
+            "Costes": coste,
             "Costes (€)": -coste_eur,
-            "Check suma": ret_neta - (r_bmk + seleccion + peso - coste),
+            "Dividendos (€)": divs_eur,
+            "Check": r_cartera - (r_bmk + seleccion + pesos + coste),
         })
 
-        if guardar_detalle and filas:
-            detalles[periodo] = pd.DataFrame(filas).set_index("Ticker")
+        cash += divs_eur
 
-    semanal = pd.DataFrame(resumen).set_index("Periodo")
+    return pd.DataFrame(filas).set_index("Periodo")
 
-    nav = cash + valor_pos(fecha_valor)
-    resultado_nav = nav - capital_inicial
-    seleccion_eur = semanal["Selección (€)"].sum()
-    pesos_eur = semanal["Pesos (€)"].sum()
-    costes_eur = semanal["Costes (€)"].sum()
-    alpha_eur = seleccion_eur + pesos_eur + costes_eur
-    mercado_eur = resultado_nav - alpha_eur
+
+def encadenar_atribucion(semanal, capital_inicial=10_000_000):
+    nav = float(capital_inicial)
+    bmk = float(capital_inicial)
+
+    comp = {
+        "Ef. selección (€)": 0.0,
+        "Ef. pesos (€)": 0.0,
+        "Costes (€)": 0.0,
+    }
+
+    filas = []
+
+    for periodo, row in semanal.iterrows():
+        r_cartera = float(row["Rent. cartera neta"])
+        r_bmk = float(row["Rent. BMK EW"])
+        bmk_ini = bmk
+
+        efectos = {
+            "Ef. selección (€)": float(row["Ef. selección"]),
+            "Ef. pesos (€)": float(row["Ef. pesos"]),
+            "Costes (€)": float(row["Costes"]),
+        }
+
+        for nombre, efecto in efectos.items():
+            comp[nombre] = comp[nombre] * (1 + r_cartera) + bmk_ini * efecto
+
+        nav *= 1 + r_cartera
+        bmk *= 1 + r_bmk
+
+        filas.append({
+            "Periodo": periodo,
+            "NAV cartera": nav,
+            "NAV BMK EW": bmk,
+            "Alpha acumulado (€)": nav - bmk,
+            **comp,
+            "Check alpha (€)": sum(comp.values()) - (nav - bmk),
+        })
 
     final = pd.Series({
-        "Fecha valoración": fecha_valor.date(),
-        "NAV": nav,
-        "NAV normalizado": nav / capital_inicial,
-        "Rentabilidad NAV": nav / capital_inicial - 1,
-        "Resultado NAV (€)": resultado_nav,
-        "Efecto mercado (€)": mercado_eur,
-        "Alpha (€)": alpha_eur,
-        "Ef. selección (€)": seleccion_eur,
-        "Ef. pesos (€)": pesos_eur,
-        "Costes (€)": costes_eur,
+        "NAV cartera": nav,
+        "NAV BMK EW": bmk,
+        "Rentabilidad cartera": nav / capital_inicial - 1,
+        "Rentabilidad BMK EW": bmk / capital_inicial - 1,
+        "Resultado cartera (€)": nav - capital_inicial,
+        "Efecto mercado (€)": bmk - capital_inicial,
+        "Alpha (€)": nav - bmk,
+        **comp,
     })
+
+    final["Check alpha (€)"] = (
+        final["Ef. selección (€)"]
+        + final["Ef. pesos (€)"]
+        + final["Costes (€)"]
+        - final["Alpha (€)"]
+    )
 
     final["Check NAV (€)"] = (
         final["Efecto mercado (€)"]
         + final["Ef. selección (€)"]
         + final["Ef. pesos (€)"]
         + final["Costes (€)"]
-        - final["Resultado NAV (€)"]
+        - final["Resultado cartera (€)"]
     )
 
-    return semanal, detalles, final
-
-def analisis_semana(fecha_ini, fecha_fin, df, universo_tickers,
-                    capital_inicial=10_000_000, incluir_costes=True,
-                    auto_adjust=True):
-    '''Combina resultados y atribución en una única tabla por semana.'''
-    fecha_ini = pd.Timestamp(fecha_ini)
-    fecha_fin = pd.Timestamp(fecha_fin)
-
-    precios = _descargar_precios(
-        universo_tickers,
-        fecha_ini - pd.Timedelta(days=7),
-        fecha_fin + pd.Timedelta(days=1),
-        auto_adjust=auto_adjust
-    )
-
-    stoxx = yf.download(
-        "^STOXX50E",
-        start=fecha_ini - pd.Timedelta(days=7),
-        end=fecha_fin + pd.Timedelta(days=1),
-        auto_adjust=auto_adjust,
-        progress=False
-    )["Close"].squeeze().ffill()
-
-    ret_universo = pd.Series({
-        t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
-        for t in universo_tickers
-        if t in precios.columns
-        and pd.notna(precios[t].asof(fecha_ini))
-        and pd.notna(precios[t].asof(fecha_fin))
-        and precios[t].asof(fecha_ini) != 0
-    }).sort_values(ascending=False)
-
-    ranking = ret_universo.rank(ascending=False).astype(int)
-    ret_top15 = ret_universo.iloc[14] if len(ret_universo) > 14 else ret_universo.iloc[-1]
-    ret_stoxx = stoxx.asof(fecha_fin) / stoxx.asof(fecha_ini) - 1
-    ret_bmk_ew = ret_universo.mean()
-    peso_bmk = 1 / len(universo_tickers)
-
-    pos, cash = estado_cartera(fecha_ini, df, capital_inicial, incluir_costes)
-    nav_ini = _nav(fecha_ini, pos, cash, precios)
-    nav_fin = _nav(fecha_fin, pos, cash, precios)
-    ret_cartera = nav_fin / nav_ini - 1
-
-    resultados = []
-
-    for t, cantidad in pos.items():
-        if t not in ret_universo:
-            continue
-
-        precio_ini = precios[t].asof(fecha_ini)
-        precio_fin = precios[t].asof(fecha_fin)
-        retorno = ret_universo[t]
-        peso = cantidad * precio_ini / nav_ini
-
-        resultados.append({
-            "Ticker": t,
-            "Peso": peso,
-            "Retorno": retorno,
-            "P&L (€)": cantidad * (precio_fin - precio_ini),
-            "Ranking": ranking[t],
-            "Diff vs Top15": retorno - ret_top15,
-            "Ef. Selección": peso_bmk * (retorno - ret_stoxx),
-            "Ef. Peso": (peso - peso_bmk) * (retorno - ret_stoxx),
-            "Top 15?": "✓" if ranking[t] <= 15 else "✗"
-        })
-
-    df_resultado = pd.DataFrame(resultados).set_index("Ticker").sort_values("Ranking")
-
-    if abs(cash) > 1e-9:
-        df_resultado.loc["CASH"] = {
-            "Peso": cash / nav_ini,
-            "Retorno": 0.0,
-            "P&L (€)": 0.0,
-            "Ranking": "-",
-            "Diff vs Top15": -ret_top15,
-            "Ef. Selección": 0.0,
-            "Ef. Peso": (cash / nav_ini) * (-ret_stoxx),
-            "Top 15?": "-"
-        }
-
-    df_resultado.loc["TOTAL"] = {
-        "Peso": df_resultado["Peso"].sum(),
-        "Retorno": ret_cartera,
-        "P&L (€)": df_resultado["P&L (€)"].sum(),
-        "Ranking": "-",
-        "Diff vs Top15": ret_cartera - ret_top15,
-        "Ef. Selección": df_resultado["Ef. Selección"].sum(),
-        "Ef. Peso": df_resultado["Ef. Peso"].sum(),
-        "Top 15?": f"Alpha vs STOXX: {ret_cartera - ret_stoxx:+.2%}"
-    }
-
-    tickers_reales = df_resultado.index.difference(["CASH", "TOTAL"])
-    hit_rate = (df_resultado.loc[tickers_reales, "Top 15?"] == "✓").mean()
-
-    print(
-        f"Periodo: {fecha_ini.date()} → {fecha_fin.date()} | "
-        f"Ret. Cartera: {ret_cartera:.2%} | "
-        f"Hit rate: {hit_rate:.0%} | "
-        f"BMK STOXX: {ret_stoxx:.2%} | "
-        f"BMK EW: {ret_bmk_ew:.2%}"
-    )
-
-    return df_resultado
+    return pd.DataFrame(filas).set_index("Periodo"), final
 
 
-def analisis_todas_semanas(df, universo_tickers=None, capital_inicial=10_000_000,
-                           auto_adjust=True, fecha_valor=None):
-    df = df.copy()
-    df["fecha"] = pd.to_datetime(df["fecha"])
-    fecha_valor = pd.Timestamp.today().normalize() if fecha_valor is None else pd.Timestamp(fecha_valor)
+def formatear_atribucion(semanal, detalle_acumulado, final):
+    def pct(x):
+        return f"{float(x):.2%}" if pd.notna(x) else ""
 
-    ops = df[
-        (df["fecha"] <= fecha_valor)
-        & (df["Accion"].str.upper().isin(["COMPRA", "VENTA"]))
-    ].copy()
+    def keur(x):
+        return f"{float(x) / 1000:,.1f} k€" if pd.notna(x) else ""
 
-    tickers = ops["Ticker"].unique().tolist()
-    precios = _descargar_precios(
-        tickers,
-        ops["fecha"].min(),
-        fecha_valor + pd.Timedelta(days=2),
-        auto_adjust=auto_adjust,
-    )
+    semanal_fmt = semanal.copy().astype(object)
+    detalle_fmt = detalle_acumulado.copy().astype(object)
+    final_fmt = final.to_frame("Valor").astype(object)
 
-    fecha_valor = precios.index[precios.index <= fecha_valor].max()
+    pct_cols = [
+        "Rent. cartera neta", "Rent. BMK EW", "Alpha",
+        "Ef. selección", "Ef. pesos", "Costes", "Check"
+    ]
 
-    signo = np.where(ops["Accion"].str.upper().eq("COMPRA"), -1, 1)
-    ops["Flujo neto (€)"] = signo * ops["Cantidad"] * ops["Precio_Ejecutado"]
-    ops["Flujo bruto (€)"] = signo * ops["Cantidad"] * ops["Precio"]
+    eur_cols = [
+        "NAV inicial", "NAV final", "Costes (€)", "Dividendos (€)"
+    ]
 
-    tabla = ops.groupby("Ticker")[["Flujo neto (€)", "Flujo bruto (€)"]].sum()
+    for c in pct_cols:
+        if c in semanal_fmt.columns:
+            semanal_fmt[c] = semanal[c].map(pct)
 
-    pos_final, cash_final = estado_cartera(
-        fecha_valor,
-        df,
+    for c in eur_cols:
+        if c in semanal_fmt.columns:
+            semanal_fmt[c] = semanal[c].map(keur)
+
+    for c in detalle_fmt.columns:
+        if "(€)" in c or "NAV" in c:
+            detalle_fmt[c] = detalle_acumulado[c].map(keur)
+
+    for idx in final_fmt.index:
+        valor = final.loc[idx]
+
+        if "(€)" in idx or "NAV" in idx:
+            final_fmt.loc[idx, "Valor"] = keur(valor)
+        elif "Rentabilidad" in idx:
+            final_fmt.loc[idx, "Valor"] = pct(valor)
+        else:
+            final_fmt.loc[idx, "Valor"] = valor
+
+    return semanal_fmt, detalle_fmt, final_fmt
+
+
+def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
+                                capital_inicial=10_000_000, hoja="Operativa",
+                                incluir_costes=True, benchmark="^STOXX50E"):
+
+    semanal = tabla_semanal_atribucion(
+        archivo=archivo,
+        universo_tickers=universo_tickers,
+        fecha_fin=fecha_fin,
         capital_inicial=capital_inicial,
-        incluir_costes=True,
+        hoja=hoja,
+        incluir_costes=incluir_costes,
     )
 
-    valor_final = {
-        t: q * precios[t].asof(fecha_valor)
-        for t, q in pos_final.items()
-        if t in precios.columns and pd.notna(precios[t].asof(fecha_valor))
-    }
+    _, final = encadenar_atribucion(semanal, capital_inicial)
 
-    tabla["Valor final posición (€)"] = pd.Series(valor_final)
-    tabla["Valor final posición (€)"] = tabla["Valor final posición (€)"].fillna(0)
-
-    tabla["P&L neto (€)"] = tabla["Flujo neto (€)"] + tabla["Valor final posición (€)"]
-    tabla["P&L bruto (€)"] = tabla["Flujo bruto (€)"] + tabla["Valor final posición (€)"]
-    tabla["Efecto costes (€)"] = tabla["P&L neto (€)"] - tabla["P&L bruto (€)"]
-
-    tabla = tabla[[
-        "P&L neto (€)",
-        "P&L bruto (€)",
-        "Efecto costes (€)",
-        "Valor final posición (€)",
-        "Flujo neto (€)",
-    ]].sort_values("P&L neto (€)", ascending=False)
-
-    nav = cash_final + sum(valor_final.values())
-    tabla.loc["TOTAL"] = tabla.sum()
-    tabla.loc["TOTAL", "Diferencia vs NAV (€)"] = tabla.loc["TOTAL", "P&L neto (€)"] - (nav - capital_inicial)
-
-    return tabla
-        
-def generar_tabla_aciertos(df, universo_tickers):
-    """
-    Genera una tabla con filas = empresas seleccionadas alguna vez,
-    columnas = semanas, y celdas:
-    - ✅ si la empresa fue predicha esa semana y estuvo en el top 15
-    - ❌ si fue predicha pero no entró en el top 15
-    - - si no fue predicha esa semana
-    """
-    fechas_op = sorted(df["fecha"].unique())
-    semanas = []  # lista de etiquetas para las columnas
-    datos = {}    # diccionario anidado: datos[ticker][semana] = símbolo
-
-    for i in range(len(fechas_op) - 1):
-        fecha_ini = fechas_op[i]
-        fecha_fin = fechas_op[i + 1]
-        etiqueta_semana = f"{fecha_ini.date()}→{fecha_fin.date()}"
-        semanas.append(etiqueta_semana)
-
-        # Obtener la tabla de análisis de la semana
-        tabla_semana = analisis_semana(fecha_ini, fecha_fin, df, universo_tickers)
-
-        # Extraer los tickers que fueron predichos (todas las filas excepto 'TOTAL')
-        tickers_predichos = tabla_semana.index.difference(["TOTAL", "CASH"])
-        # Mapear ticker -> si estuvo en top 15 (True/False)
-        exito = {}
-        for t in tickers_predichos:
-            exito[t] = (tabla_semana.loc[t, "Top 15?"] == "✓")
-
-        # Actualizar la matriz de datos
-        for t in tickers_predichos:
-            if t not in datos:
-                datos[t] = {}
-            datos[t][etiqueta_semana] = "✅" if exito[t] else "❌"
-
-        # Para los tickers que ya habían aparecido en semanas anteriores pero no en esta,
-        # se dejarán como '-' más adelante (rellenamos con NaN luego)
-
-    # Construir DataFrame a partir del diccionario
-    df_resumen = pd.DataFrame.from_dict(datos, orient='index')
-    # Rellenar las celdas vacías (ticker no predicho esa semana) con '-'
-    df_resumen = df_resumen.fillna('-')
-    # Asegurar el orden de las columnas según las semanas
-    df_resumen = df_resumen[semanas]
-    # Ordenar filas alfabéticamente (opcional)
-    df_resumen.sort_index(inplace=True)
-
-    return df_resumen
-        
-def top_bottom_universo(fecha_ini, fecha_fin, df, universo_tickers, n=10):
-    precios = yf.download(universo_tickers, start=fecha_ini - pd.Timedelta(days=7),
-                          end=fecha_fin + pd.Timedelta(days=1), auto_adjust=True, progress=False)["Close"].ffill()
-
-    ret_universo = pd.Series({
-        t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
-        for t in universo_tickers if t in precios.columns
-    }).sort_values(ascending=False)
-
-    pos, cash = estado_cartera(fecha_ini, df, capital_inicial=10_000_000, incluir_costes=True)
-    nav_ini = cash + _valor_posicion(fecha_ini, pos, precios)
-
-    pesos = {
-        t: q * precios[t].asof(fecha_ini) / nav_ini
-        for t, q in pos.items()
-        if t in precios.columns and pd.notna(precios[t].asof(fecha_ini))
-    }
-
-    def construir_tabla(serie):
-        df_t = serie.reset_index()
-        df_t.columns = ["Ticker", "Retorno"]
-        df_t["Elegido?"] = df_t["Ticker"].apply(lambda t: "✓" if t in pesos else "✗")
-        df_t["Peso"] = df_t["Ticker"].apply(lambda t: pesos.get(t, None))
-        return df_t.set_index("Ticker")
-
-    top = construir_tabla(ret_universo.head(n))
-    bottom = construir_tabla(ret_universo.tail(n))
-
-    print(f"Periodo: {fecha_ini.date()} → {fecha_fin.date()}")
-    print(f"\n🔼 Top {n}")
-    display(top.style.format({"Retorno": "{:.2%}", "Peso": lambda x: f"{x:.2%}" if x is not None else "-"}))
-    print(f"\n🔽 Bottom {n}")
-    display(bottom.style.format({"Retorno": "{:.2%}", "Peso": lambda x: f"{x:.2%}" if x is not None else "-"}))
-
-
-def top_bottom_todas_semanas(df, universo_tickers, n=10):
-    fechas_op = sorted(df["fecha"].unique())
-    for i in range(len(fechas_op) - 1):
-        top_bottom_universo(fechas_op[i], fechas_op[i + 1], df, universo_tickers, n)
-        print()
-        
-def tabla_aciertos_semanales(df, universo_tickers):
-    '''Muestra para cada semana: % de activos en Top15, Top30, Top45, Resto.'''
-    fechas_op = sorted(df["fecha"].unique())
-    precios = yf.download(universo_tickers, start=fechas_op[0] - pd.Timedelta(days=7),
-                          end=fechas_op[-1] + pd.Timedelta(days=7), 
-                          auto_adjust=True, progress=False)["Close"].ffill()
-    
-    resultados = []
-    for i in range(len(fechas_op) - 1):
-        fecha_ini, fecha_fin = fechas_op[i], fechas_op[i + 1]
-        
-        ret_universo = pd.Series({
-            t: precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
-            for t in universo_tickers if t in precios.columns
-        })
-        ranking = ret_universo.rank(ascending=False)
-        
-        cartera_ini = cartera(fecha_ini, df)
-        tickers_elegidos = [t for t in cartera_ini.keys() if t in ranking]
-        n_total = len(tickers_elegidos)
-        
-        if n_total == 0:
-            continue
-            
-        ranks = ranking[tickers_elegidos]
-        resultados.append({
-            "Periodo": f"{fecha_ini.date()} → {fecha_fin.date()}",
-            "Top 15": f"{(ranks <= 15).sum()}/{n_total}",
-            "Top 30": f"{((ranks > 15) & (ranks <= 30)).sum()}/{n_total}",
-            "Top 45": f"{((ranks > 30) & (ranks <= 45)).sum()}/{n_total}",
-            "Bottom 5": f"{(ranks > 45).sum()}/{n_total}",
-        })
-    
-    return pd.DataFrame(resultados)
-
-
-def recuperar_scores_historicos(fechas_op, universo_tickers, modelo_path="../mi_cartera/modelo_estado.pkl"):
-    '''Recupera los scores del modelo para cada fecha de operación usando el modelo guardado.'''
-    with open(modelo_path, "rb") as f:
-        modelo = pickle.load(f)
-
-    prov = YFinanceProvider()
-    fe = FeatureEngineer(criterio=5, ticker_indice="^STOXX50E")
-    universo = UniversoActivosEstatico(universo_tickers)
-
-    start = fechas_op[0] - pd.DateOffset(years=5)
-    end = fechas_op[-1] + pd.Timedelta(days=1)
-    df_daily = prov.download_prices_daily(universo_tickers + ["^STOXX50E"], start, end)
-    df_weekly = prov.download_prices_weekly(universo_tickers + ["^STOXX50E"], start, end)
-    df = fe.build(df_weekly, df_daily)
-
-    scores_por_fecha = {}
-    for fecha in fechas_op:
-        df_hoy = df[df["Fecha"] == pd.Timestamp(fecha)]
-        if df_hoy.empty:
-            continue
-        proba = modelo.predict_proba(df_hoy[fe.feature_cols])
-        scores_por_fecha[fecha] = dict(zip(df_hoy["Ticker"], proba))
-
-    return scores_por_fecha
-
-
-def analisis_scores(scores_por_fecha, df, universo_tickers, ultimas_n=None):
-    '''Analiza la calibración del modelo comparando scores con rentabilidades reales.
-    
-    Parámetros:
-    -----------
-    ultimas_n : int, opcional
-        Si se especifica, analiza solo las últimas N semanas
-    '''
-    fechas_op = sorted(scores_por_fecha.keys())
-    
-    # Filtrar solo las últimas N semanas si se especifica
-    if ultimas_n is not None:
-        fechas_op = fechas_op[-ultimas_n:]
-        if len(fechas_op) == 0:
-            print(f"No hay suficientes semanas. Total disponible: {len(sorted(scores_por_fecha.keys()))}")
-            return pd.DataFrame()
-    
-    tickers = universo_tickers
-    
-    start = fechas_op[0] - pd.Timedelta(days=7)
-    end = fechas_op[-1] + pd.Timedelta(days=7)
-    precios = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)["Close"].ffill()
-
-    filas = []
-    for i in range(len(fechas_op) - 1):
-        fecha_ini = fechas_op[i]
-        fecha_fin = fechas_op[i + 1]
-        scores = scores_por_fecha[fecha_ini]
-
-        # Calculamos quintiles sobre todos los scores de la fecha
-        scores_series = pd.Series(scores)
-        quintiles = pd.qcut(scores_series, q=5, labels=["Q1", "Q2", "Q3", "Q4", "Q5"], duplicates="drop")
-
-        for t, score in scores.items():
-            if t not in precios.columns:
-                continue
-            retorno = precios[t].asof(fecha_fin) / precios[t].asof(fecha_ini) - 1
-            elegido = t in cartera(fecha_ini, df)
-            filas.append({
-                "Fecha": fecha_ini,
-                "Ticker": t,
-                "Score": score,
-                "Retorno": retorno,
-                "Elegido": elegido,
-                "Quintil": quintiles.get(t)
-            })
-
-    df_scores = pd.DataFrame(filas)
-
-    # Rentabilidad media por quintil de score
-    print(f"Rentabilidad media por quintil de score ({'todas las semanas' if ultimas_n is None else f'últimas {ultimas_n} semanas'}):")
-    display(df_scores.groupby("Quintil")["Retorno"].mean().to_frame().style.format("{:.2%}"))
-
-    # Score medio de elegidos vs no elegidos
-    print("\nScore medio elegidos vs no elegidos:")
-    display(df_scores.groupby("Elegido")["Score"].mean().to_frame().style.format("{:.3f}"))
-
-    return df_scores
-
-def resumen_por_activo(df, universo_tickers):
-    """
-    Genera una tabla resumen por activo con el desempeño agregado en todas las semanas.
-    
-    Parámetros:
-    - df: DataFrame con columna 'fecha' (fechas de rebalanceo/inicio de semana)
-    - universo_tickers: lista de tickers considerados
-    
-    Retorna:
-    - DataFrame con filas = activos seleccionados alguna vez, columnas = métricas agregadas.
-    """
-    fechas_op = sorted(df["fecha"].unique())
-    registros = []   # lista de dicts con una entrada por cada selección semanal
-
-    for i in range(len(fechas_op) - 1):
-        fecha_ini = fechas_op[i]
-        fecha_fin = fechas_op[i + 1]
-        tabla_semana = analisis_semana(fecha_ini, fecha_fin, df, universo_tickers)
-        # Excluir la fila "TOTAL" que añade analisis_semana
-        tabla_semana = tabla_semana[tabla_semana.index != "TOTAL"]
-        
-        for ticker, row in tabla_semana.iterrows():
-            registros.append({
-                "Ticker": ticker,
-                "Seleccionado": 1,
-                "Acierto": 1 if row["Top 15?"] == "✓" else 0,
-                "Retorno": row["Retorno"],
-                "Ranking": row["Ranking"] if row["Ranking"] != "-" else None
-            })
-
-    if not registros:
-        print("No hay selecciones en el período.")
-        return pd.DataFrame()
-
-    df_reg = pd.DataFrame(registros)
-    
-    # Agregación por ticker
-    resumen = df_reg.groupby("Ticker").agg(
-        Veces_Seleccionado=("Seleccionado", "sum"),
-        Aciertos=("Acierto", "sum"),
-        Retorno_Promedio=("Retorno", "mean"),
-        Ranking_Promedio=("Ranking", "mean")
-    ).reset_index()
-    
-    # Calcular hit rate
-    resumen["Hit_Rate"] = resumen["Aciertos"] / resumen["Veces_Seleccionado"]
-    
-    # Ordenar por hit rate descendente y después por frecuencia
-    resumen = resumen.sort_values(["Hit_Rate", "Veces_Seleccionado"], ascending=[False, False])
-    
-    # Formateo para presentación
-    resumen["Hit_Rate"] = resumen["Hit_Rate"].apply(lambda x: f"{x:.0%}")
-    resumen["Retorno_Promedio"] = resumen["Retorno_Promedio"].apply(lambda x: f"{x:.2%}")
-    resumen["Ranking_Promedio"] = resumen["Ranking_Promedio"].apply(
-        lambda x: f"{x:.1f}" if pd.notna(x) else "-"
+    hist = historico_valor_cartera(
+        archivo=archivo,
+        fecha_fin=fecha_fin,
+        capital_inicial=capital_inicial,
+        hoja=hoja,
+        incluir_costes=incluir_costes,
     )
-    
-    # Añadir fila de totales globales
-    total_selecciones = df_reg["Seleccionado"].sum()
-    total_aciertos = df_reg["Acierto"].sum()
-    total_hit_rate = total_aciertos / total_selecciones if total_selecciones > 0 else 0
-    total_ret_promedio = df_reg["Retorno"].mean()
-    
-    total_row = pd.DataFrame({
-        "Ticker": ["TOTAL"],
-        "Veces_Seleccionado": [total_selecciones],
-        "Aciertos": [total_aciertos],
-        "Hit_Rate": [f"{total_hit_rate:.0%}"],
-        "Retorno_Promedio": [f"{total_ret_promedio:.2%}"],
-        "Ranking_Promedio": ["-"]
-    })
-    
-    resumen = pd.concat([resumen, total_row], ignore_index=True)
-    return resumen
 
-def grafico_score_vs_retorno(df_scores):
-    """
-    Scatter plot: Score del modelo vs Retorno real siguiente semana.
-    Cada punto = un activo en una semana.
-    Línea de regresión muestra la correlación.
-    """
-    import matplotlib.pyplot as plt
-    from scipy.stats import pearsonr
-    
-    # Eliminar NaNs
-    data = df_scores[["Score", "Retorno"]].dropna()
-    
-    if data.empty:
-        print("No hay datos válidos para graficar")
-        return
-    
-    # Calcular correlación
-    corr, p_value = pearsonr(data["Score"], data["Retorno"])
-    
-    # Crear gráfico
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Scatter plot
-    ax.scatter(data["Score"], data["Retorno"], alpha=0.4, s=20, color="steelblue")
-    
-    # Línea de regresión
-    z = np.polyfit(data["Score"], data["Retorno"], 1)
-    p = np.poly1d(z)
-    ax.plot(data["Score"], p(data["Score"]), "r--", linewidth=2, 
-            label=f"Regresión (pendiente={z[0]:.3f})")
-    
-    # Línea horizontal en y=0
-    ax.axhline(0, color='gray', linestyle=':', linewidth=1)
-    
-    # Etiquetas
-    ax.set_xlabel("Score del modelo", fontsize=12)
-    ax.set_ylabel("Retorno semana siguiente", fontsize=12)
-    ax.set_title(f"Score vs Retorno Real | Correlación = {corr:.3f} (p={p_value:.4f})", 
-                 fontsize=14, fontweight="bold")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    
-    # Formato de porcentajes en eje Y
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.1%}'))
-    
+    fecha_fin_real = pd.to_datetime(semanal.index[-1].split(" → ")[1])
+    cartera = hist.loc[:fecha_fin_real, "Valor cartera"].copy()
+    cartera.name = "Estrategia real"
+
+    ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
+    precios, dividendos, _ = _datos_mercado(ops, fecha_fin, universo_tickers)
+    precios = precios.loc[cartera.index.min():fecha_fin_real]
+    dividendos = dividendos.reindex(precios.index).fillna(0.0)
+
+    bmk_ew = _serie_bmk_ew_diaria(
+        semanal=semanal,
+        precios=precios,
+        dividendos=dividendos,
+        universo_tickers=universo_tickers,
+        capital_inicial=capital_inicial,
+    )
+    bmk_ew = bmk_ew.reindex(cartera.index).ffill()
+    bmk_ew.name = "STOXX 50 EW"
+
+    datos_bmk = yf.download(
+        benchmark,
+        start=cartera.index.min().strftime("%Y-%m-%d"),
+        end=(fecha_fin_real + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+    )
+
+    bmk = datos_bmk["Close"].squeeze().reindex(cartera.index).ffill()
+    bmk = capital_inicial * bmk / bmk.iloc[0]
+    bmk.name = "STOXX 50"
+
+    series = pd.concat([cartera, bmk, bmk_ew], axis=1).dropna(how="all")
+
+    if abs(series["Estrategia real"].iloc[-1] - final["NAV cartera"]) > 1:
+        raise ValueError("La cartera diaria no cuadra con el NAV final.")
+
+    if abs(series["STOXX 50 EW"].iloc[-1] - final["NAV BMK EW"]) > 1:
+        raise ValueError("El benchmark EW diario no cuadra con el NAV BMK EW final.")
+
+    retornos = series.pct_change().dropna()
+
+    tabla_metricas = pd.DataFrame(index=series.columns)
+    tabla_metricas["Rentabilidad"] = series.iloc[-1] / series.iloc[0] - 1
+    tabla_metricas["Volatilidad"] = retornos.std() * np.sqrt(252)
+    tabla_metricas["Max DD"] = (series / series.cummax() - 1).min()
+    tabla_metricas["Sharpe"] = (retornos.mean() / retornos.std()) * np.sqrt(252)
+
+    tabla_metricas = tabla_metricas.reset_index().rename(columns={"index": "Estrategia"})
+
+    tabla_metricas_fmt = (
+        tabla_metricas.style
+        .format({
+            "Rentabilidad": "{:.2%}",
+            "Volatilidad": "{:.2%}",
+            "Max DD": "{:.2%}",
+            "Sharpe": "{:.2f}",
+        })
+        .set_table_styles([
+            {
+                "selector": "th",
+                "props": [
+                    ("background-color", "#28669A"),
+                    ("color", "white"),
+                    ("font-weight", "bold"),
+                    ("text-align", "center"),
+                    ("border", "1px solid #8AA6C1"),
+                ],
+            },
+            {
+                "selector": "td",
+                "props": [
+                    ("background-color", "white"),
+                    ("color", "black"),
+                    ("font-weight", "bold"),
+                    ("text-align", "center"),
+                    ("border", "1px solid #E0E0E0"),
+                    ("padding", "10px"),
+                ],
+            },
+            {
+                "selector": "caption",
+                "props": [
+                    ("caption-side", "top"),
+                    ("font-weight", "bold"),
+                    ("font-size", "14px"),
+                    ("color", "#1E2A4A"),
+                ],
+            },
+        ])
+        .hide(axis="index")
+    )
+
+    return series, semanal, final, tabla_metricas, tabla_metricas_fmt
+
+
+def _serie_bmk_ew_diaria(semanal, precios, dividendos, universo_tickers,
+                         capital_inicial=10_000_000):
+
+    serie = {}
+    valor_base = float(capital_inicial)
+
+    for periodo, row in semanal.iterrows():
+        f0_txt, f1_txt = periodo.split(" → ")
+        f0, f1 = pd.Timestamp(f0_txt), pd.Timestamp(f1_txt)
+
+        fechas = precios.index[(precios.index >= f0) & (precios.index <= f1)]
+        if len(fechas) == 0:
+            continue
+
+        tickers = [t for t in universo_tickers if t in precios.columns]
+        p0 = precios.loc[f0, tickers].dropna()
+        p1 = precios.loc[f1, p0.index].dropna()
+        validos = p0.index.intersection(p1.index)
+        validos = [t for t in validos if p0[t] != 0]
+
+        if not validos:
+            continue
+
+        divs = dividendos.loc[fechas, validos].copy()
+        divs.loc[divs.index <= f0, :] = 0.0
+        divs_acum = divs.cumsum()
+
+        rel = (precios.loc[fechas, validos] + divs_acum).div(p0[validos]) - 1
+        valores = valor_base * (1 + rel.mean(axis=1))
+
+        serie.update(valores.to_dict())
+        valor_base *= 1 + float(row["Rent. BMK EW"])
+
+    return pd.Series(serie).sort_index()
+
+
+def grafico_diario_cartera_bmks(series, titulo="Evolución diaria de la cartera vs benchmarks",
+                                guardar=None):
+
+    col_cartera = "Estrategia real"
+
+    colores = {
+        "Estrategia real": "#4F82FF",
+        "STOXX 50": "#FFB84D",
+        "STOXX 50 EW": "#2FE6D0",
+    }
+
+    fondo = "#070A2D"
+    grid = "#2A2F5F"
+    texto = "white"
+
+    fig, ax = plt.subplots(figsize=(13.5, 6.2), dpi=180)
+    fig.patch.set_facecolor(fondo)
+    ax.set_facecolor(fondo)
+
+    for col in series.columns:
+        ax.plot(
+            series.index,
+            series[col],
+            label=col,
+            color=colores.get(col, "white"),
+            linewidth=3.0 if col == col_cartera else 2.3,
+            alpha=0.98,
+        )
+
+    ax.axhline(
+        series.iloc[0, 0],
+        color="white",
+        linewidth=1.2,
+        linestyle="--",
+        alpha=0.35,
+    )
+
+    ax.fill_between(
+        series.index,
+        series[col_cartera],
+        series.iloc[0, 0],
+        color=colores[col_cartera],
+        alpha=0.10,
+    )
+
+    for col in series.columns:
+        y = series[col].iloc[-1]
+        ax.scatter(series.index[-1], y, color=colores.get(col, "white"), s=45, zorder=5)
+        ax.text(
+            series.index[-1],
+            y,
+            f"  {y / 1_000_000:.2f} M€",
+            color=colores.get(col, "white"),
+            fontsize=12,
+            fontweight="bold",
+            va="center",
+        )
+
+    ax.set_title(titulo, color=texto, fontsize=21, fontweight="bold", pad=20)
+    ax.set_ylabel("Valor de la cartera", color=texto, fontsize=14, fontweight="bold")
+
+    ax.tick_params(axis="x", colors=texto, labelsize=12, rotation=25)
+    ax.tick_params(axis="y", colors=texto, labelsize=12)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1_000_000:.2f} M€"))
+
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+    ax.spines["left"].set_color("#6D739C")
+    ax.spines["bottom"].set_color("#6D739C")
+    ax.grid(True, color=grid, linewidth=0.8, alpha=0.45)
+
+    legend = ax.legend(
+        loc="upper left",
+        frameon=True,
+        facecolor="#101545",
+        edgecolor="#3C4275",
+        fontsize=12,
+    )
+
+    for text in legend.get_texts():
+        text.set_color("white")
+
+    rent_cartera = series[col_cartera].iloc[-1] / series[col_cartera].iloc[0] - 1
+    alpha_ew = series[col_cartera].iloc[-1] - series["STOXX 50 EW"].iloc[-1]
+
+    # caja = (
+    #     f"NAV final: {series[col_cartera].iloc[-1] / 1_000_000:.3f} M€\n"
+    #     f"Rentabilidad: {rent_cartera:+.2%}\n"
+    #     f"Alpha vs EW: {alpha_ew / 1000:+.0f} k€"
+    # )
+
+    # ax.text(
+    #     0.02,
+    #     0.08,
+    #     caja,
+    #     transform=ax.transAxes,
+    #     fontsize=13,
+    #     color="white",
+    #     fontweight="bold",
+    #     bbox=dict(
+    #         boxstyle="round,pad=0.55,rounding_size=0.18",
+    #         facecolor="#2F6EA7",
+    #         edgecolor="none",
+    #         alpha=0.95,
+    #     ),
+    # )
+
     plt.tight_layout()
+
+    if guardar is not None:
+        plt.savefig(guardar, dpi=300, bbox_inches="tight", facecolor=fig.get_facecolor())
+
     plt.show()
-    
-    # Estadísticas adicionales
-    print(f"\n📊 Correlación Score-Retorno: {corr:.4f}")
-    print(f"   Significancia (p-value): {p_value:.4f}")
-    print(f"   Pendiente regresión: {z[0]:.4f}")
-    print(f"\n   Interpretación:")
-    if abs(corr) < 0.1:
-        print("   ❌ Correlación casi nula → modelo no predice")
-    elif corr < 0:
-        print("   🔴 Correlación NEGATIVA → modelo invertido")
-    elif corr < 0.2:
-        print("   🟡 Correlación débil → modelo poco útil")
-    elif corr < 0.4:
-        print("   🟢 Correlación moderada → modelo funcional")
-    else:
-        print("   ✅ Correlación fuerte → buen modelo")
+
+    return fig, ax
+
