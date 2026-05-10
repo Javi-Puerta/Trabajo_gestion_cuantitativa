@@ -62,8 +62,13 @@ class FeatureEngineer:
         features_diarias = self._build_daily_features(df_daily)
         df = df.merge(features_diarias, on=["Fecha", "Ticker"], how="left")
 
+        if "Dividendos" not in df.columns:
+            df["Dividendos"] = 0.0
+
+        precio_prev = df.groupby("Ticker")["Precio_Close"].shift(1)
+        
         # 2) variables semanales
-        df["Retorno_1W"] = df.groupby("Ticker")["Precio_Close"].pct_change(1)
+        df["Retorno_1W"] = (df["Precio_Close"] + df["Dividendos"]) / precio_prev - 1
 
         # Momentum (calculamos 12M para derivar Mom_12m_ex_1m pero no la incluimos en features)
         df["Momentum_12M"] = df.groupby("Ticker")["Precio_Close"].pct_change(52)
@@ -125,12 +130,14 @@ class FeatureEngineer:
 
         # Target: el retorno la semana siguiente. Luego se convertirá a clasificación según el criterio elegido.
         df["Retorno_Next_Week"] = df.groupby("Ticker")["Retorno_1W"].shift(-1)
+        valid = df["Retorno_Next_Week"].notna()
+
         if self.criterio == "mediana":
             mediana = df.groupby("Fecha")["Retorno_Next_Week"].transform("median")
-            df["Target"] = (df["Retorno_Next_Week"] > mediana).astype(int)
+            df["Target"] = np.where(valid, (df["Retorno_Next_Week"] > mediana).astype(int), np.nan)
         else:
             rank = df.groupby("Fecha")["Retorno_Next_Week"].rank(method="first", ascending=False)
-            df["Target"] = (rank <= self.criterio).astype(int)
+            df["Target"] = np.where(valid, (rank <= self.criterio).astype(int), np.nan)
 
         # ----------------------------------------------------------------
         # Features finales (conjunto reducido y balanceado)

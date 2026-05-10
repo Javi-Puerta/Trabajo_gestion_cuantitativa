@@ -14,6 +14,7 @@ class MotorInversion:
     HISTORIAL_FILE  = "historial_operaciones.csv"
     TRAIN_DATE_FILE = "ultimo_entrenamiento.txt"
     MODELO_FILE     = "modelo_estado.pkl"
+    DIV_DATE_FILE   = "ultima_fecha_dividendos.txt"
     MESES_RETRAIN   = 6
 
     def __init__(self, universo, feature_engineer, estrategia, estado_path, len_ventana,
@@ -31,7 +32,9 @@ class MotorInversion:
         self.path.mkdir(parents=True, exist_ok=True)
         self.cartera = self._cargar_cartera()
         self._ultimo_train = self._leer_fecha_train()
+        self._ultima_fecha_dividendos = self._leer_fecha_dividendos()   
         self._cargar_modelo()
+
 
     def ejecutar(self, fecha: date) -> pd.DataFrame:
         '''Ejecuta el motor de inversión. Reentrena el modelo si toca (cada 6 meses), genera las señales
@@ -44,6 +47,7 @@ class MotorInversion:
         print(señales.to_string(index=False))
 
         return señales
+
 
     def _reentrenar_si_toca(self, fecha: date):
         necesita = (self._ultimo_train is None or
@@ -60,6 +64,7 @@ class MotorInversion:
         self._ultimo_train = fecha_corte.date()
         (self.path / self.TRAIN_DATE_FILE).write_text(self._ultimo_train.isoformat())
 
+
     def _descargar_datos(self, fecha: date, long_hist):
         '''Descarga los datos de precios desde long_hist años antes de la fecha. Necesitamos un año
         más de datos para poder construir bien las variables.'''
@@ -70,21 +75,86 @@ class MotorInversion:
 
         return (prov.download_prices_daily(tickers, start, end),
                 prov.download_prices_weekly(tickers, start, end))
+    
+    
+    def _leer_fecha_dividendos(self) -> date | None:
+        p = self.path / self.DIV_DATE_FILE
+        return date.fromisoformat(p.read_text().strip()) if p.exists() else None
+
+
+    def _guardar_fecha_dividendos(self, fecha: date):
+        (self.path / self.DIV_DATE_FILE).write_text(fecha.isoformat())
+
+
+    def _actualizar_dividendos(self, fecha: pd.Timestamp, df_daily: pd.DataFrame) -> float:
+        if "Dividendos" not in df_daily.columns:
+            raise ValueError("df_daily no tiene columna 'Dividendos'. Revisa ProveedorDatos.py.")
+
+        fecha = pd.Timestamp(fecha).normalize()
+
+        if self._ultima_fecha_dividendos is None:
+            self._ultima_fecha_dividendos = fecha.date()
+            self._guardar_fecha_dividendos(fecha.date())
+            return 0.0
+
+        fecha_ini = pd.Timestamp(self._ultima_fecha_dividendos)
+        tickers = [t for t in self.cartera if t != "cash"]
+
+        if not tickers:
+            self._ultima_fecha_dividendos = fecha.date()
+            self._guardar_fecha_dividendos(fecha.date())
+            return 0.0
+
+        mask = (
+            df_daily["Ticker"].isin(tickers)
+            & (df_daily["Fecha"] > fecha_ini)
+            & (df_daily["Fecha"] <= fecha)
+        )
+
+        divs = df_daily.loc[mask].groupby("Ticker")["Dividendos"].sum()
+
+        cobrado = sum(
+            float(self.cartera.get(t, 0.0)) * float(divs.get(t, 0.0))
+            for t in tickers
+        )
+
+        self.cartera["cash"] = float(self.cartera.get("cash", 0.0)) + cobrado
+        self._ultima_fecha_dividendos = fecha.date()
+        self._guardar_fecha_dividendos(fecha.date())
+
+        return float(cobrado)
+
 
     def _generar_señales(self, fecha: date) -> pd.DataFrame:
         fecha = pd.Timestamp(fecha)
+
         df_daily, df_weekly = self._descargar_datos(fecha, long_hist=self.ventana)
+
+        div_cobrados = self._actualizar_dividendos(fecha, df_daily)
+        if div_cobrados != 0:
+            print(f"[Dividendos] {fecha.date()} | cobrados: {div_cobrados:.2f}€")
+
         df = self.fe.build(df_weekly, df_daily)
         tickers_validos = self.universo.get_universe_at_date(fecha)
         df_hoy = df[(df["Fecha"] == fecha) & (df["Ticker"].isin(tickers_validos))]
-        pesos_obj = self.estrategia.seleccionar(df_hoy, self.fe.feature_cols, self.cartera, df_daily)
+
+        datos_valoracion = df_daily[df_daily["Fecha"] == fecha].copy()
+        precios = datos_valoracion.set_index("Ticker")["Precio_Close"].to_dict()
+
+        pesos_obj = self.estrategia.seleccionar(
+            df_hoy,
+            self.fe.feature_cols,
+            self.cartera,
+            df_daily
+        )
+
         print(f"[Señales] {fecha.date()} | Pesos objetivo: {pesos_obj}")
-        precios = df_daily[df_daily["Fecha"] == fecha].set_index("Ticker")["Precio_Close"].to_dict()
 
         actuales = set(self.cartera.keys()) - {"cash"}
         objetivo = set(pesos_obj.keys())
         filas = []
-        vp = mark_to_market(self.cartera, df_hoy)
+
+        vp = mark_to_market(self.cartera, datos_valoracion)
         print(f"Valor de la cartera antes de ejecutar señales: {vp:.2f}€")
 
         # Ventas
@@ -149,6 +219,7 @@ class MotorInversion:
             
         return pd.DataFrame(filas).sort_values("Accion").reset_index(drop=True)
 
+
     def _cargar_cartera(self) -> pd.DataFrame:
         '''Carga la cartera actual desde un archivo json.'''
         p = self.path / self.CARTERA_FILE
@@ -157,11 +228,13 @@ class MotorInversion:
         with open(p, "r") as f:
             return json.load(f)
 
+
     def _guardar_cartera(self):
         '''Guarda la cartera actual en un archivo json.'''
         p = self.path / self.CARTERA_FILE
         with open(p, "w") as f:
             json.dump(self.cartera, f)
+
 
     def _guardar_historial(self, fecha: date, señales: pd.DataFrame):
         if señales.empty:
@@ -171,11 +244,13 @@ class MotorInversion:
         df.insert(0, "fecha", fecha)
         df.to_csv(p, mode="a", header=not p.exists(), index=False)
 
+
     def _leer_fecha_train(self) -> date | None:
         '''Lee la fecha del último entrenamiento del modelo.'''
         p = self.path / self.TRAIN_DATE_FILE
         
         return date.fromisoformat(p.read_text().strip()) if p.exists() else None
+
 
     def _cargar_modelo(self):
         p = self.path / self.MODELO_FILE
@@ -186,9 +261,11 @@ class MotorInversion:
         if hasattr(self.estrategia, "modelo"):
             self.estrategia.modelo = modelo
 
+
     def _guardar_modelo(self):
         modelo = getattr(self.estrategia, "modelo", None)
         if modelo is None:
             return
         with open(self.path / self.MODELO_FILE, "wb") as f:
             pickle.dump(modelo, f)
+            

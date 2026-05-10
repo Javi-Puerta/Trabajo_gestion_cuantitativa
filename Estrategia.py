@@ -1,4 +1,3 @@
-import random
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
@@ -101,13 +100,22 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
 
         # Retornos diarios actualizados a hoy
         fecha_hoy = pd.Timestamp(datos["Fecha"].iloc[0])
-        ret = (
-            df_daily[df_daily["Ticker"].isin(candidatos)]
-            .pivot(index="Fecha", columns="Ticker", values="Precio_Close")
-            .sort_index().loc[:fecha_hoy]
-            .tail(self.dias_retorno).pct_change()
-            .dropna(axis=1, how="all").fillna(0)
+        hist = df_daily[df_daily["Ticker"].isin(candidatos)].copy()
+
+        px = (
+            hist.pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+            .sort_index()
+            .loc[:fecha_hoy]
         )
+
+        div = (
+            hist.pivot(index="Fecha", columns="Ticker", values="Dividendos")
+            .reindex(px.index)
+            .fillna(0.0)
+        )
+
+        ret = ((px + div) / px.shift(1) - 1).tail(self.dias_retorno)
+        ret = ret.dropna(axis=1, how="all").fillna(0.0)
 
         if ret.shape[1] < 2:
             peso = 1 / len(candidatos)

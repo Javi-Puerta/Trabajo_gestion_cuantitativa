@@ -59,6 +59,53 @@ def _leer_operaciones(archivo, fecha_fin=None, hoja="Operativa", incluir_costes=
     return ops.sort_values("fecha").reset_index(drop=True), fecha_fin
 
 
+def _capar_pesos(w, cap=0.10):
+    w = w.dropna()
+    libres = list(w.index)
+    out = pd.Series(0.0, index=w.index)
+    restante = 1.0
+
+    while libres:
+        aux = w[libres] / w[libres].sum() * restante
+        topados = aux[aux > cap].index
+
+        if len(topados) == 0:
+            out[libres] = aux
+            break
+
+        out[topados] = cap
+        restante -= cap * len(topados)
+        libres = [t for t in libres if t not in topados]
+
+    return out / out.sum()
+
+
+def calcular_pesos_bmk_actuales(tickers, cap=0.10):
+    caps = {}
+
+    for t in tickers:
+        tk = yf.Ticker(t)
+        try:
+            mc = tk.fast_info.get("market_cap", np.nan)
+        except Exception:
+            mc = np.nan
+
+        if pd.isna(mc):
+            try:
+                mc = tk.info.get("marketCap", np.nan)
+            except Exception:
+                mc = np.nan
+
+        if pd.notna(mc) and mc > 0:
+            caps[t] = float(mc)
+
+    if not caps:
+        raise ValueError("No se han podido calcular capitalizaciones para el benchmark.")
+
+    w = pd.Series(caps, dtype=float)
+    return _capar_pesos(w / w.sum(), cap=cap)
+
+
 def _campo_yf(datos, campo, tickers):
     if isinstance(datos.columns, pd.MultiIndex):
         if campo in datos.columns.get_level_values(0):
@@ -142,12 +189,119 @@ def historico_valor_cartera(archivo, fecha_fin=None, capital_inicial=10_000_000,
     })
 
 
+def pnl_por_activo(archivo, fecha_fin=None, capital_inicial=10_000_000,
+                   hoja="Operativa", incluir_costes=True, nombres_cortos=None):
+
+    nombres_cortos = nombres_cortos or {
+        "SAN.MC": "B. Santander", "BBVA.MC": "BBVA", "BNP.PA": "BNP",
+        "INGA.AS": "ING", "ADS.DE": "Adidas", "ASML.AS": "ASML",
+        "IFX.DE": "Infineon", "ENR.DE": "Siemens Energy", "UCG.MI": "UniCredit",
+        "SAF.PA": "Safran", "SGO.PA": "Saint-Gobain", "RACE.MI": "Ferrari",
+        "RMS.PA": "Hermès", "ARGX.BR": "Argenx", "ENI.MI": "ENI",
+        "ITX.MC": "Inditex", "AIR.PA": "Airbus", "ADYEN.AS": "Adyen",
+        "EL.PA": "EssilorLuxottica", "WKL.AS": "Wolters Kluwer",
+        "PRX.AS": "Prosus", "SAP.DE": "SAP", "BAYN.DE": "Bayer",
+        "TTE.PA": "TotalEnergies", "RHM.DE": "Rheinmetall",
+        "DBK.DE": "Deutsche Bank",
+    }
+
+    def nombre(t):
+        if t in nombres_cortos:
+            return nombres_cortos[t]
+        try:
+            n = yf.Ticker(t).info.get("shortName", t)
+        except Exception:
+            n = t
+        return str(n).replace(" S.A.", "").replace(" SE", "").replace(" AG", "").replace(" N.V.", "")[:22]
+
+    ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
+    precios, dividendos, ops = _datos_mercado(ops, fecha_fin)
+
+    fecha_valor = precios.index[precios.index <= fecha_fin].max()
+    ops = ops[ops["fecha_trade"] <= fecha_valor].copy()
+    tickers = sorted(ops["ticker"].unique())
+
+    precios = precios.loc[:fecha_valor, tickers]
+    dividendos = dividendos.reindex(precios.index).fillna(0.0)[tickers]
+
+    posiciones = pd.DataFrame(0.0, index=precios.index, columns=tickers)
+
+    for r in ops.itertuples():
+        signo = 1 if r.accion == "COMPRA" else -1
+        posiciones.loc[r.fecha_trade:, r.ticker] += signo * abs(float(r.cantidad))
+
+    ops["flujo"] = np.where(ops["accion"].eq("VENTA"), 1, -1) * ops["cantidad"].abs() * ops["precio_ejecutado"]
+
+    pnl = ops.groupby("ticker")["flujo"].sum().reindex(tickers, fill_value=0.0)
+    pnl += (posiciones.shift(1).fillna(0.0) * dividendos).sum()
+    pnl += posiciones.loc[fecha_valor] * precios.loc[fecha_valor]
+
+    total = float(pnl.sum())
+
+    cash_final = capital_inicial + ops["flujo"].sum() + (posiciones.shift(1).fillna(0.0) * dividendos).sum().sum()
+    nav_real = cash_final + (posiciones.loc[fecha_valor] * precios.loc[fecha_valor]).sum()
+
+    if abs((capital_inicial + total) - nav_real) > 1:
+        raise ValueError("El P&L por activo no cuadra con el NAV final.")
+
+    tabla = pnl.rename("P&L (€)").to_frame()
+    tabla["Activo"] = tabla.index.map(nombre)
+    tabla = tabla.set_index("Activo").sort_values("P&L (€)")
+    tabla.loc["TOTAL"] = total
+
+    fondo = "#070A2D"
+    datos = tabla.drop("TOTAL")
+    datos = datos[
+        ~datos.index.to_series().str.contains("overn|swap|rate", case=False, regex=True)
+    ]
+    pnl_medio = float(datos["P&L (€)"].mean())
+    print(f"P&L medio por activo: {pnl_medio:,.2f} €")
+    colores = np.where(datos["P&L (€)"] >= 0, "#2FE6D0", "#FF3B30")
+
+    fig, ax = plt.subplots(figsize=(12.5, max(5, 0.32 * len(datos))), dpi=180)
+    fig.patch.set_facecolor(fondo)
+    ax.set_facecolor(fondo)
+
+    ax.barh(datos.index, datos["P&L (€)"], color=colores, alpha=0.92)
+    ax.axvline(0, color="white", linewidth=1, alpha=0.65)
+    ax.axvline(total, color="#FFD166", linewidth=2.2, linestyle="--",
+               label=f"P&L total: {total:,.0f} €")
+
+    ax.set_title("P&L por activo", color="white", fontsize=20, fontweight="bold", pad=14)
+    ax.set_xlabel("P&L neto (€)", color="white", fontsize=12)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f} €"))
+
+    ax.tick_params(colors="white", labelsize=10)
+    ax.grid(True, axis="x", color="white", alpha=0.12, linewidth=0.8)
+
+    for s in ax.spines.values():
+        s.set_color("#6D739C")
+
+    leg = ax.legend(loc="lower right", frameon=True, fontsize=10)
+    leg.get_frame().set_facecolor("#101545")
+    leg.get_frame().set_edgecolor("#4D5AA0")
+    leg.get_frame().set_alpha(0.85)
+    for txt in leg.get_texts():
+        txt.set_color("white")
+
+    plt.tight_layout()
+    plt.show()
+
+    return tabla, fig, ax
+
+
 def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
                              capital_inicial=10_000_000, hoja="Operativa",
-                             incluir_costes=True):
+                             incluir_costes=True, pesos_bmk=None):
 
     ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
     precios, dividendos, ops = _datos_mercado(ops, fecha_fin, universo_tickers)
+    
+    if pesos_bmk is None:
+        pesos_bmk = calcular_pesos_bmk_actuales(universo_tickers)
+
+    pesos_bmk = pd.Series(pesos_bmk, dtype=float)
+    pesos_bmk = pesos_bmk[pesos_bmk > 0] / pesos_bmk[pesos_bmk > 0].sum()
 
     fecha_valor = precios.index[precios.index <= fecha_fin].max()
     fechas_op = sorted(f for f in ops["fecha_trade"].unique() if f <= fecha_valor)
@@ -199,8 +353,14 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
             if t in precios.columns
         }).dropna()
 
-        r_bmk = float(ret_universo.mean()) if len(ret_universo) else 0.0
-        w_bmk = 1 / len(ret_universo) if len(ret_universo) else 0.0
+        pesos_periodo = pesos_bmk.reindex(ret_universo.index).dropna()
+
+        if len(pesos_periodo):
+            pesos_periodo = pesos_periodo / pesos_periodo.sum()
+            ret_universo = ret_universo.reindex(pesos_periodo.index)
+            r_bmk = float((pesos_periodo * ret_universo).sum())
+        else:
+            r_bmk = 0.0
 
         seleccion = 0.0
         pesos = 0.0
@@ -216,7 +376,7 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
                 continue
 
             w = q * p0 / nav0
-            b = w_bmk if t in ret_universo.index else 0.0
+            b = float(pesos_periodo.get(t, 0.0))
             exceso = r - r_bmk
 
             seleccion += b * exceso
@@ -235,7 +395,7 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
             "NAV inicial": nav0,
             "NAV final": nav1,
             "Rent. cartera neta": r_cartera,
-            "Rent. BMK EW": r_bmk,
+            "Rent. BMK": r_bmk,
             "Alpha": r_cartera - r_bmk,
             "Ef. selección": seleccion,
             "Ef. pesos": pesos,
@@ -264,7 +424,7 @@ def encadenar_atribucion(semanal, capital_inicial=10_000_000):
 
     for periodo, row in semanal.iterrows():
         r_cartera = float(row["Rent. cartera neta"])
-        r_bmk = float(row["Rent. BMK EW"])
+        r_bmk = float(row["Rent. BMK"])
         bmk_ini = bmk
 
         efectos = {
@@ -282,7 +442,7 @@ def encadenar_atribucion(semanal, capital_inicial=10_000_000):
         filas.append({
             "Periodo": periodo,
             "NAV cartera": nav,
-            "NAV BMK EW": bmk,
+            "NAV BMK": bmk,
             "Alpha acumulado (€)": nav - bmk,
             **comp,
             "Check alpha (€)": sum(comp.values()) - (nav - bmk),
@@ -290,9 +450,9 @@ def encadenar_atribucion(semanal, capital_inicial=10_000_000):
 
     final = pd.Series({
         "NAV cartera": nav,
-        "NAV BMK EW": bmk,
+        "NAV BMK": bmk,
         "Rentabilidad cartera": nav / capital_inicial - 1,
-        "Rentabilidad BMK EW": bmk / capital_inicial - 1,
+        "Rentabilidad BMK": bmk / capital_inicial - 1,
         "Resultado cartera (€)": nav - capital_inicial,
         "Efecto mercado (€)": bmk - capital_inicial,
         "Alpha (€)": nav - bmk,
@@ -317,49 +477,68 @@ def encadenar_atribucion(semanal, capital_inicial=10_000_000):
     return pd.DataFrame(filas).set_index("Periodo"), final
 
 
-def formatear_atribucion(semanal, detalle_acumulado, final):
+def formatear_atribucion(semanal, final):
     def pct(x):
-        return f"{float(x):.2%}" if pd.notna(x) else ""
+        return "" if pd.isna(x) else f"{float(x):.2%}"
 
     def keur(x):
-        return f"{float(x) / 1000:,.1f} k€" if pd.notna(x) else ""
+        return "" if pd.isna(x) else f"{float(x) / 1000:,.1f} k€"
 
-    semanal_fmt = semanal.copy().astype(object)
-    detalle_fmt = detalle_acumulado.copy().astype(object)
-    final_fmt = final.to_frame("Valor").astype(object)
+    def num(x):
+        return "" if pd.isna(x) else f"{float(x):.2f}"
 
-    pct_cols = [
-        "Rent. cartera neta", "Rent. BMK EW", "Alpha",
-        "Ef. selección", "Ef. pesos", "Costes", "Check"
+    def vol_anual(r):
+        return r.std(ddof=1) * np.sqrt(52)
+
+    def sharpe(r):
+        v = r.std(ddof=1)
+        return np.nan if v == 0 or pd.isna(v) else r.mean() / v * np.sqrt(52)
+
+    cols = [
+        "NAV inicial", "NAV final", "Rent. cartera neta",
+        "Alpha", "Ef. selección", "Ef. pesos", "Costes"
     ]
 
-    eur_cols = [
-        "NAV inicial", "NAV final", "Costes (€)", "Dividendos (€)"
-    ]
+    semanal_fmt = semanal[[c for c in cols if c in semanal.columns]].copy().astype(object)
 
-    for c in pct_cols:
+    for c in ["Rent. cartera neta", "Alpha", "Ef. selección", "Ef. pesos", "Costes"]:
         if c in semanal_fmt.columns:
             semanal_fmt[c] = semanal[c].map(pct)
 
-    for c in eur_cols:
+    for c in ["NAV inicial", "NAV final"]:
         if c in semanal_fmt.columns:
             semanal_fmt[c] = semanal[c].map(keur)
 
-    for c in detalle_fmt.columns:
-        if "(€)" in c or "NAV" in c:
-            detalle_fmt[c] = detalle_acumulado[c].map(keur)
+    r_cartera = semanal["Rent. cartera neta"]
+    r_bmk = semanal["Rent. BMK"]
+    capital_ini = final["NAV cartera"] - final["Resultado cartera (€)"]
 
-    for idx in final_fmt.index:
-        valor = final.loc[idx]
+    final_fmt = pd.DataFrame({
+        "Cartera": {
+            "NAV final": keur(final["NAV cartera"]),
+            "Resultado": f"{keur(final['Resultado cartera (€)'])} ({pct(final['Rentabilidad cartera'])})",
+            "Rentabilidad": pct(final["Rentabilidad cartera"]),
+            "Volatilidad anualizada": pct(vol_anual(r_cartera)),
+            "Sharpe": num(sharpe(r_cartera)),
+            "Alpha vs BMK": f"{keur(final['Alpha (€)'])} ({pct(final['Alpha (€)'] / capital_ini)})",
+            "Ef. selección": f"{keur(final['Ef. selección (€)'])} ({pct(final['Ef. selección (€)'] / capital_ini)})",
+            "Ef. pesos": f"{keur(final['Ef. pesos (€)'])} ({pct(final['Ef. pesos (€)'] / capital_ini)})",
+            "Costes": f"{keur(final['Costes (€)'])} ({pct(final['Costes (€)'] / capital_ini)})",
+        },
+        "BMK": {
+            "NAV final": keur(final["NAV BMK"]),
+            "Resultado": f"{keur(final['Efecto mercado (€)'])} ({pct(final['Rentabilidad BMK'])})",
+            "Rentabilidad": pct(final["Rentabilidad BMK"]),
+            "Volatilidad anualizada": pct(vol_anual(r_bmk)),
+            "Sharpe": num(sharpe(r_bmk)),
+            "Alpha vs BMK": "",
+            "Ef. selección": "",
+            "Ef. pesos": "",
+            "Costes": "",
+        }
+    })
 
-        if "(€)" in idx or "NAV" in idx:
-            final_fmt.loc[idx, "Valor"] = keur(valor)
-        elif "Rentabilidad" in idx:
-            final_fmt.loc[idx, "Valor"] = pct(valor)
-        else:
-            final_fmt.loc[idx, "Valor"] = valor
-
-    return semanal_fmt, detalle_fmt, final_fmt
+    return semanal_fmt, final_fmt
 
 
 def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
@@ -389,21 +568,6 @@ def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
     cartera = hist.loc[:fecha_fin_real, "Valor cartera"].copy()
     cartera.name = "Estrategia real"
 
-    ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
-    precios, dividendos, _ = _datos_mercado(ops, fecha_fin, universo_tickers)
-    precios = precios.loc[cartera.index.min():fecha_fin_real]
-    dividendos = dividendos.reindex(precios.index).fillna(0.0)
-
-    bmk_ew = _serie_bmk_ew_diaria(
-        semanal=semanal,
-        precios=precios,
-        dividendos=dividendos,
-        universo_tickers=universo_tickers,
-        capital_inicial=capital_inicial,
-    )
-    bmk_ew = bmk_ew.reindex(cartera.index).ffill()
-    bmk_ew.name = "STOXX 50 EW"
-
     datos_bmk = yf.download(
         benchmark,
         start=cartera.index.min().strftime("%Y-%m-%d"),
@@ -416,13 +580,10 @@ def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
     bmk = capital_inicial * bmk / bmk.iloc[0]
     bmk.name = "STOXX 50"
 
-    series = pd.concat([cartera, bmk, bmk_ew], axis=1).dropna(how="all")
+    series = pd.concat([cartera, bmk], axis=1).dropna(how="all")
 
     if abs(series["Estrategia real"].iloc[-1] - final["NAV cartera"]) > 1:
         raise ValueError("La cartera diaria no cuadra con el NAV final.")
-
-    if abs(series["STOXX 50 EW"].iloc[-1] - final["NAV BMK EW"]) > 1:
-        raise ValueError("El benchmark EW diario no cuadra con el NAV BMK EW final.")
 
     retornos = series.pct_change().dropna()
 
@@ -480,156 +641,53 @@ def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
     return series, semanal, final, tabla_metricas, tabla_metricas_fmt
 
 
-def _serie_bmk_ew_diaria(semanal, precios, dividendos, universo_tickers,
-                         capital_inicial=10_000_000):
-
-    serie = {}
-    valor_base = float(capital_inicial)
-
-    for periodo, row in semanal.iterrows():
-        f0_txt, f1_txt = periodo.split(" → ")
-        f0, f1 = pd.Timestamp(f0_txt), pd.Timestamp(f1_txt)
-
-        fechas = precios.index[(precios.index >= f0) & (precios.index <= f1)]
-        if len(fechas) == 0:
-            continue
-
-        tickers = [t for t in universo_tickers if t in precios.columns]
-        p0 = precios.loc[f0, tickers].dropna()
-        p1 = precios.loc[f1, p0.index].dropna()
-        validos = p0.index.intersection(p1.index)
-        validos = [t for t in validos if p0[t] != 0]
-
-        if not validos:
-            continue
-
-        divs = dividendos.loc[fechas, validos].copy()
-        divs.loc[divs.index <= f0, :] = 0.0
-        divs_acum = divs.cumsum()
-
-        rel = (precios.loc[fechas, validos] + divs_acum).div(p0[validos]) - 1
-        valores = valor_base * (1 + rel.mean(axis=1))
-
-        serie.update(valores.to_dict())
-        valor_base *= 1 + float(row["Rent. BMK EW"])
-
-    return pd.Series(serie).sort_index()
-
-
-def grafico_diario_cartera_bmks(series, titulo="Evolución diaria de la cartera vs benchmarks",
-                                guardar=None):
-
-    col_cartera = "Estrategia real"
-
-    colores = {
-        "Estrategia real": "#4F82FF",
-        "STOXX 50": "#FFB84D",
-        "STOXX 50 EW": "#2FE6D0",
-    }
+def grafico_evolucion_drawdown(series, titulo="Evolución de la cartera y drawdown"):
+    cols = [c for c in ["Estrategia real", "STOXX 50"] if c in series.columns]
+    dd = series[cols].div(series[cols].cummax()).sub(1)
 
     fondo = "#070A2D"
-    grid = "#2A2F5F"
-    texto = "white"
+    colores = {"Estrategia real": "#4F82FF", "STOXX 50": "#FFB84D"}
 
-    fig, ax = plt.subplots(figsize=(13.5, 6.2), dpi=180)
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(13.5, 8), dpi=180, sharex=True,
+        gridspec_kw={"height_ratios": [2.1, 1], "hspace": 0.08}
+    )
     fig.patch.set_facecolor(fondo)
-    ax.set_facecolor(fondo)
 
-    for col in series.columns:
-        ax.plot(
-            series.index,
-            series[col],
-            label=col,
-            color=colores.get(col, "white"),
-            linewidth=3.0 if col == col_cartera else 2.3,
-            alpha=0.98,
-        )
+    for ax in (ax1, ax2):
+        ax.set_facecolor(fondo)
+        ax.grid(True, color="white", alpha=0.12, linewidth=0.8)
+        ax.tick_params(colors="white", labelsize=11)
+        for s in ax.spines.values():
+            s.set_color("#6D739C")
 
-    ax.axhline(
-        series.iloc[0, 0],
-        color="white",
-        linewidth=1.2,
-        linestyle="--",
-        alpha=0.35,
-    )
+    for col in cols:
+        ax1.plot(series.index, series[col], color=colores[col], linewidth=2.7, label=col)
+        ax2.plot(dd.index, dd[col], color=colores[col], linewidth=2.0,
+                 label=f"{col} ({dd[col].min():.2%})")
 
-    ax.fill_between(
-        series.index,
-        series[col_cartera],
-        series.iloc[0, 0],
-        color=colores[col_cartera],
-        alpha=0.10,
-    )
+    ax2.fill_between(dd.index, dd["Estrategia real"], 0, color="#FF3B30", alpha=0.28)
+    ax1.axhline(series.iloc[0, 0], color="white", linestyle="--", linewidth=1, alpha=0.35)
+    ax2.axhline(0, color="white", linewidth=1, alpha=0.65)
 
-    for col in series.columns:
-        y = series[col].iloc[-1]
-        ax.scatter(series.index[-1], y, color=colores.get(col, "white"), s=45, zorder=5)
-        ax.text(
-            series.index[-1],
-            y,
-            f"  {y / 1_000_000:.2f} M€",
-            color=colores.get(col, "white"),
-            fontsize=12,
-            fontweight="bold",
-            va="center",
-        )
+    ax1.set_title(titulo, color="white", fontsize=22, fontweight="bold", pad=16)
+    ax1.set_ylabel("Valor cartera", color="white", fontsize=13)
+    ax2.set_ylabel("Drawdown", color="white", fontsize=13)
+    ax2.set_xlabel("Fecha", color="white", fontsize=13)
 
-    ax.set_title(titulo, color=texto, fontsize=21, fontweight="bold", pad=20)
-    ax.set_ylabel("Valor de la cartera", color=texto, fontsize=14, fontweight="bold")
+    ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1_000_000:.2f} M€"))
+    ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0%}"))
+    ax2.set_ylim(dd.min().min() * 1.15, 0.003)
 
-    ax.tick_params(axis="x", colors=texto, labelsize=12, rotation=25)
-    ax.tick_params(axis="y", colors=texto, labelsize=12)
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1_000_000:.2f} M€"))
-
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-
-    ax.spines["left"].set_color("#6D739C")
-    ax.spines["bottom"].set_color("#6D739C")
-    ax.grid(True, color=grid, linewidth=0.8, alpha=0.45)
-
-    legend = ax.legend(
-        loc="upper left",
-        frameon=True,
-        facecolor="#101545",
-        edgecolor="#3C4275",
-        fontsize=12,
-    )
-
-    for text in legend.get_texts():
-        text.set_color("white")
-
-    rent_cartera = series[col_cartera].iloc[-1] / series[col_cartera].iloc[0] - 1
-    alpha_ew = series[col_cartera].iloc[-1] - series["STOXX 50 EW"].iloc[-1]
-
-    # caja = (
-    #     f"NAV final: {series[col_cartera].iloc[-1] / 1_000_000:.3f} M€\n"
-    #     f"Rentabilidad: {rent_cartera:+.2%}\n"
-    #     f"Alpha vs EW: {alpha_ew / 1000:+.0f} k€"
-    # )
-
-    # ax.text(
-    #     0.02,
-    #     0.08,
-    #     caja,
-    #     transform=ax.transAxes,
-    #     fontsize=13,
-    #     color="white",
-    #     fontweight="bold",
-    #     bbox=dict(
-    #         boxstyle="round,pad=0.55,rounding_size=0.18",
-    #         facecolor="#2F6EA7",
-    #         edgecolor="none",
-    #         alpha=0.95,
-    #     ),
-    # )
+    for ax, loc, fs in [(ax1, "upper left", 11), (ax2, "lower left", 10)]:
+        leg = ax.legend(loc=loc, frameon=True, fontsize=fs)
+        leg.get_frame().set_facecolor("#101545")
+        leg.get_frame().set_edgecolor("#4D5AA0")
+        leg.get_frame().set_alpha(0.82)
+        for t in leg.get_texts():
+            t.set_color("white")
 
     plt.tight_layout()
-
-    if guardar is not None:
-        plt.savefig(guardar, dpi=300, bbox_inches="tight", facecolor=fig.get_facecolor())
-
     plt.show()
-
-    return fig, ax
+    return fig, (ax1, ax2)
 

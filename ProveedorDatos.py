@@ -21,46 +21,65 @@ class ProveedorDatosBase(ABC):
     def download_prices_weekly(self, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
         """
         Devuelve DataFrame con columnas ['Fecha', 'Ticker', 'Precio_Close', 'Volumen_USD'] ordenado por
-        Ticker y Fecha. Los precios son ajustados y semanales (último precio de cada semana).
+        Ticker y Fecha. Los precios son no ajustados y semanales (último precio de cada semana).
         """
         pass
 
 class YFinanceProvider(ProveedorDatosBase):
     def download_prices_daily(self, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
-        data = yf.download(tickers, start=start_date, end=end_date,
-                interval="1d", auto_adjust=False, progress=False)
+        data = yf.download(
+            tickers,
+            start=start_date,
+            end=end_date,
+            interval="1d",
+            auto_adjust=False,
+            actions=True,
+            progress=False,
+        )
 
-        precios = data["Adj Close"].stack().reset_index()
+        precios = data["Close"].stack().reset_index()
         precios.columns = ["Fecha", "Ticker", "Precio_Close"]
 
         volumenes = data["Volume"].stack().reset_index()
         volumenes.columns = ["Fecha", "Ticker", "Volumen"]
 
-        df = precios.merge(volumenes, on=["Fecha", "Ticker"])
+        if "Dividends" in data.columns.get_level_values(0):
+            dividendos = data["Dividends"].stack().reset_index()
+            dividendos.columns = ["Fecha", "Ticker", "Dividendos"]
+        else:
+            dividendos = precios[["Fecha", "Ticker"]].copy()
+            dividendos["Dividendos"] = 0.0
+
+        df = (
+            precios
+            .merge(volumenes, on=["Fecha", "Ticker"], how="left")
+            .merge(dividendos, on=["Fecha", "Ticker"], how="left")
+        )
+
         df["Volumen_USD"] = df["Precio_Close"] * df["Volumen"]
         df["Fecha"] = pd.to_datetime(df["Fecha"])
-        
-        # Crear índice completo de fechas
+
         fecha_inicio = pd.to_datetime(start_date)
         fecha_fin = pd.to_datetime(end_date)
         todas_fechas = pd.date_range(start=fecha_inicio, end=fecha_fin, freq="D")
         todos_tickers = df["Ticker"].unique()
-        
-        idx_completo = pd.MultiIndex.from_product([todas_fechas, todos_tickers], 
-                                                names=["Fecha", "Ticker"])
-        
+
+        idx_completo = pd.MultiIndex.from_product(
+            [todas_fechas, todos_tickers],
+            names=["Fecha", "Ticker"]
+        )
+
         df = df.set_index(["Fecha", "Ticker"]).reindex(idx_completo)
-        
-        # Forward fill y BACKWARD fill para asegurar que todos tengan precio desde el día 1
+
         df["Precio_Close"] = df.groupby("Ticker")["Precio_Close"].ffill()
         df["Volumen_USD"] = df.groupby("Ticker")["Volumen_USD"].ffill()
-        
-        df = df.reset_index()
-        df = df.dropna(subset=["Precio_Close"])
+        df["Dividendos"] = df["Dividendos"].fillna(0.0)
 
-        return df[["Fecha", "Ticker", "Precio_Close", "Volumen_USD"]].sort_values(
-            ["Ticker", "Fecha"]
-        ).reset_index(drop=True)
+        df = df.reset_index().dropna(subset=["Precio_Close"])
+
+        return df[
+            ["Fecha", "Ticker", "Precio_Close", "Volumen_USD", "Dividendos"]
+        ].sort_values(["Ticker", "Fecha"]).reset_index(drop=True)
 
     def download_prices_weekly(self, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
         start_buffered = (pd.to_datetime(start_date) - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -69,13 +88,14 @@ class YFinanceProvider(ProveedorDatosBase):
         df_daily["Fecha"] = pd.to_datetime(df_daily["Fecha"])
 
         weekly = (
-            df_daily[["Fecha", "Ticker", "Precio_Close", "Volumen_USD"]]
+            df_daily[["Fecha", "Ticker", "Precio_Close", "Volumen_USD", "Dividendos"]]
             .set_index("Fecha")
-            .groupby("Ticker")[["Precio_Close", "Volumen_USD"]]
+            .groupby("Ticker")[["Precio_Close", "Volumen_USD", "Dividendos"]]
             .resample("W-FRI")
             .agg(
                 Precio_Close=("Precio_Close", "last"),
                 Volumen_USD=("Volumen_USD", "sum"),
+                Dividendos=("Dividendos", "sum"),
             )
         )
 
