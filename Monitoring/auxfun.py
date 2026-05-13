@@ -543,7 +543,7 @@ def formatear_atribucion(semanal, final):
 
 def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
                                 capital_inicial=10_000_000, hoja="Operativa",
-                                incluir_costes=True, benchmark="^STOXX50E"):
+                                incluir_costes=True, benchmark="^STOXX50E", rf_anual=0.02):
 
     semanal = tabla_semanal_atribucion(
         archivo=archivo,
@@ -586,12 +586,14 @@ def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
         raise ValueError("La cartera diaria no cuadra con el NAV final.")
 
     retornos = series.pct_change().dropna()
+    rf_diario = (1 + rf_anual) ** (1 / 252) - 1
+    exceso = retornos - rf_diario
 
     tabla_metricas = pd.DataFrame(index=series.columns)
     tabla_metricas["Rentabilidad"] = series.iloc[-1] / series.iloc[0] - 1
     tabla_metricas["Volatilidad"] = retornos.std() * np.sqrt(252)
     tabla_metricas["Max DD"] = (series / series.cummax() - 1).min()
-    tabla_metricas["Sharpe"] = (retornos.mean() / retornos.std()) * np.sqrt(252)
+    tabla_metricas["Sharpe"] = (exceso.mean() / retornos.std()) * np.sqrt(252)
 
     tabla_metricas = tabla_metricas.reset_index().rename(columns={"index": "Estrategia"})
 

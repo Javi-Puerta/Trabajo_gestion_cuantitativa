@@ -270,6 +270,140 @@ class BacktestEngine:
         return pd.DataFrame(list(historial_neto.items()), columns=["Fecha", "Valor cartera"])
 
 
+    def _generar_pesos_random_sobre_activos(self, activos: list[str], rng,
+                                            peso_min: float = 0.02,
+                                            peso_max: float = 0.15) -> dict[str, float]:
+        n = len(activos)
+
+        if n == 0:
+            return {}
+
+        if n * peso_max < 1 or n * peso_min > 1:
+            w = np.ones(n) / n
+            return {t: float(p) for t, p in zip(activos, w)}
+
+        while True:
+            w = rng.dirichlet(np.ones(n))
+            if (w >= peso_min).all() and (w <= peso_max).all():
+                return {t: float(p) for t, p in zip(activos, w)}
+
+
+    def run_con_monos_pesos(self, n_monos: int = 1000,
+                            peso_min: float = 0.02,
+                            peso_max: float = 0.15,
+                            seed: int = 42) -> tuple[pd.Series, pd.DataFrame]:
+
+        fecha_inicio_bt = self.start_date
+        fecha_fin_bt = self.end_date
+
+        fechas_diarias = sorted(
+            f for f in self.df_daily["Fecha"].unique()
+            if fecha_inicio_bt <= f <= fecha_fin_bt
+        )
+
+        fechas_rebalanceo = sorted(
+            f for f in self.df_weekly["Fecha"].unique()
+            if fecha_inicio_bt <= f <= fecha_fin_bt
+        )
+        fechas_rebalanceo_set = set(fechas_rebalanceo[:-1])
+
+        ultima_fecha_train = None
+        modelo_entrenado = False
+
+        cartera_real = {"cash": self.nominal}
+        carteras_monos = [{"cash": self.nominal} for _ in range(n_monos)]
+
+        hist_real = {}
+        hist_monos = {i: {} for i in range(n_monos)}
+
+        rng = np.random.default_rng(seed)
+
+        for fecha_hoy in fechas_diarias:
+            datos_hoy = self.df_daily[self.df_daily["Fecha"] == fecha_hoy].copy()
+
+            self._cobrar_dividendos(cartera_real, datos_hoy)
+            for cartera in carteras_monos:
+                self._cobrar_dividendos(cartera, datos_hoy)
+
+            self.VP = mark_to_market(cartera_real, datos_hoy)
+            hist_real[fecha_hoy] = self.VP
+
+            for i, cartera in enumerate(carteras_monos):
+                hist_monos[i][fecha_hoy] = mark_to_market(cartera, datos_hoy)
+
+            if fecha_hoy not in fechas_rebalanceo_set:
+                continue
+
+            df_asof, df_daily_asof = self._datos_asof(fecha_hoy)
+            tickers_hoy = self.universo.get_universe_at_date(fecha_hoy)
+
+            if ultima_fecha_train is None or (fecha_hoy.date() - ultima_fecha_train).days >= 180:
+                train_flag = self._train(
+                    fecha_hoy,
+                    tickers_hoy,
+                    df_asof,
+                    df_daily_asof
+                )
+
+                if train_flag:
+                    ultima_fecha_train = fecha_hoy.date()
+                    modelo_entrenado = True
+
+            if not modelo_entrenado:
+                print(f"fallo al entrenar el modelo a fecha {fecha_hoy.date()}")
+                continue
+
+            datos_features_hoy = df_asof[
+                (df_asof["Fecha"] == fecha_hoy)
+                & (df_asof["Ticker"].isin(tickers_hoy))
+            ].copy()
+
+            pesos_real = self.estrategia.seleccionar(
+                datos_features_hoy,
+                self.fe.feature_cols,
+                cartera_real,
+                df_daily_asof
+            )
+
+            activos_modelo = list(pesos_real.keys())
+
+            self.VP = mark_to_market(cartera_real, datos_hoy)
+            cartera_real, _, self.VP = self._ajustar_cartera(
+                cartera_real,
+                datos_hoy,
+                pesos_real
+            )
+            hist_real[fecha_hoy] = self.VP
+
+            for i, cartera in enumerate(carteras_monos):
+                pesos_mono = self._generar_pesos_random_sobre_activos(
+                    activos_modelo,
+                    rng,
+                    peso_min=peso_min,
+                    peso_max=peso_max
+                )
+
+                self.VP = mark_to_market(cartera, datos_hoy)
+                cartera, _, vp_mono = self._ajustar_cartera(
+                    cartera,
+                    datos_hoy,
+                    pesos_mono
+                )
+
+                carteras_monos[i] = cartera
+                hist_monos[i][fecha_hoy] = vp_mono
+
+            print(f"{fecha_hoy.date()} | VP real={hist_real[fecha_hoy]:,.0f} | activos={activos_modelo}")
+
+        serie_real = pd.Series(hist_real).sort_index()
+        df_monos = pd.DataFrame({
+            f"ml_random_{i}": pd.Series(hist_monos[i]).sort_index()
+            for i in range(n_monos)
+        })
+
+        return serie_real, df_monos
+
+
     def print_results(self, bmks: list | None = None, bmk_equal_weight: list | None = None, plot: bool = True) -> None:
         serie_estrategia = self._run().set_index("Fecha")["Valor cartera"]
         serie_estrategia = serie_estrategia / self.nominal
@@ -356,15 +490,14 @@ class BacktestEngine:
 
 
 class BacktestRandom:
-    """Backtest rápido de una estrategia aleatoria:
-    - elige n_activos al azar
-    - asigna pesos aleatorios entre 2% y 20%
-    - mantiene la cartera una semana
-    - aplica costes según turnover
-    """
+    """Backtest random consistente con BacktestEngine: acciones reales, cash, costes y dividendos."""
+
+    _ajustar_pesos = BacktestEngine._ajustar_pesos
+    _cobrar_dividendos = BacktestEngine._cobrar_dividendos
+    _ajustar_cartera = BacktestEngine._ajustar_cartera
 
     def __init__(self, universo, proveedor, start_date: str, end_date: str,
-                 nominal: float, n_activos: int = 15):
+             nominal: float, n_activos: int = 15, n_simulaciones_mc: int = 1000):
         self.universo = universo
         self.proveedor = proveedor
         self.start_date = pd.Timestamp(start_date)
@@ -372,128 +505,241 @@ class BacktestRandom:
         self.nominal = nominal
         self.n_activos = n_activos
         self.peso_min = 0.02
-        self.peso_max = 0.20
+        self.peso_max = 0.15
+        self.VP = nominal
+        self.n_simulaciones_mc = n_simulaciones_mc
 
         dias_hasta_viernes = (4 - self.start_date.weekday()) % 7
         if dias_hasta_viernes > 0:
             self.start_date += pd.DateOffset(days=dias_hasta_viernes)
 
-        tickers = universo.get_full_ticker_list()
+        tickers = sorted(universo.get_full_ticker_list())
+        self.tickers = tickers
+        self.ticker_to_i = {t: i for i, t in enumerate(tickers)}
         self.costes = calcular_costes(tickers)
 
-        self.df = proveedor.download_prices_weekly(
+        data_start_date = self.start_date - pd.DateOffset(years=1)
+
+        self.df_daily = proveedor.download_prices_daily(
+            tickers,
+            data_start_date.strftime("%Y-%m-%d"),
+            self.end_date.strftime("%Y-%m-%d"),
+        )
+
+        self.df_weekly = proveedor.download_prices_weekly(
             tickers,
             self.start_date.strftime("%Y-%m-%d"),
             self.end_date.strftime("%Y-%m-%d"),
         )
-        self.df["Fecha"] = pd.to_datetime(self.df["Fecha"])
 
-        self.precios = (
-            self.df.pivot(index="Fecha", columns="Ticker", values="Precio_Close")
+        self.df_daily["Fecha"] = pd.to_datetime(self.df_daily["Fecha"])
+        self.df_weekly["Fecha"] = pd.to_datetime(self.df_weekly["Fecha"])
+
+        if "Dividendos" not in self.df_daily.columns:
+            self.df_daily["Dividendos"] = 0.0
+
+        px = (
+            self.df_daily
+            .pivot(index="Fecha", columns="Ticker", values="Precio_Close")
             .sort_index()
+            .reindex(columns=tickers)
         )
 
-        self.fechas = [f for f in self.precios.index if self.start_date <= f <= self.end_date]
-        if len(self.fechas) < 2:
+        dv = (
+            self.df_daily
+            .pivot(index="Fecha", columns="Ticker", values="Dividendos")
+            .sort_index()
+            .reindex(px.index)
+            .reindex(columns=tickers)
+            .fillna(0.0)
+        )
+
+        self.fechas = px.index[(px.index >= data_start_date) & (px.index <= self.end_date)]
+        self.px = px.reindex(self.fechas).to_numpy(float)
+        self.dv = dv.reindex(self.fechas).to_numpy(float)
+
+        prev_px = np.roll(self.px, 1, axis=0)
+        self.ret = np.nan_to_num(
+            (self.px + self.dv) / prev_px - 1.0,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        self.ret[0, :] = 0.0
+
+        self.datos_por_fecha = {
+            f: g.copy() for f, g in self.df_daily.groupby("Fecha")
+        }
+
+        self.fechas_diarias = [
+            f for f in self.fechas
+            if self.start_date <= f <= self.end_date
+        ]
+
+        self.fechas_rebalanceo = sorted(
+            f for f in self.df_weekly["Fecha"].unique()
+            if self.start_date <= f <= self.end_date
+        )
+        self.fechas_rebalanceo_set = set(self.fechas_rebalanceo[:-1])
+
+        if len(self.fechas_diarias) < 2:
             raise ValueError("No hay suficientes fechas para ejecutar el backtest.")
 
+
     def _generar_pesos(self, n: int, rng) -> np.ndarray:
+        if n * self.peso_max < 1 or n * self.peso_min > 1:
+            return np.ones(n) / n
+
         while True:
             w = rng.dirichlet(np.ones(n))
             if (w >= self.peso_min).all() and (w <= self.peso_max).all():
                 return w
 
-    def _cartera_aleatoria(self, fecha, rng) -> dict[str, float]:
-        tickers_validos = list(self.universo.get_universe_at_date(fecha))
-        precios_hoy = self.precios.loc[fecha]
 
-        tickers_validos = [t for t in tickers_validos if t in precios_hoy.index and pd.notna(precios_hoy[t])]
-        if not tickers_validos:
-            return {}
-
-        n = min(self.n_activos, len(tickers_validos))
-        elegidos = rng.choice(tickers_validos, size=n, replace=False)
-        pesos = self._generar_pesos(n, rng)
-
-        return {t: float(p) for t, p in zip(elegidos, pesos)}
-
-    def _coste_cambio(self, cartera_ant, cartera_nueva) -> float:
-        tickers = set(cartera_ant) | set(cartera_nueva)
-        coste = 0.0
-        for t in tickers:
-            delta = abs(cartera_nueva.get(t, 0.0) - cartera_ant.get(t, 0.0))
-            coste += delta * self.costes.get(t, 0.0005)
-        return coste
-
-    def _retorno_cartera(self, cartera, fecha, fecha_sig) -> float:
-        if not cartera:
-            return 0.0
-
-        precios_0 = self.precios.loc[fecha]
-        precios_1 = self.precios.loc[fecha_sig]
-
-        retorno = 0.0
-        suma_pesos = 0.0
-
-        for t, w in cartera.items():
-            p0 = precios_0.get(t, np.nan)
-            p1 = precios_1.get(t, np.nan)
-            if pd.notna(p0) and pd.notna(p1) and p0 != 0:
-                retorno += w * (p1 / p0 - 1)
-                suma_pesos += w
-
-        return retorno / suma_pesos if suma_pesos > 0 else 0.0
-
-    def _run_once(self, seed: int | None = None) -> pd.Series:
+    def _run_once(self, seed: int | None = None) -> tuple[pd.Series, pd.Series]:
         rng = np.random.default_rng(seed)
-        vp = self.nominal
-        historial = {self.fechas[0]: vp}
-        cartera_ant = {}
 
-        for i in range(len(self.fechas) - 1):
-            fecha = self.fechas[i]
-            fecha_sig = self.fechas[i + 1]
+        cartera_random = {"cash": self.nominal}
+        cartera_mc = {"cash": self.nominal}
 
-            cartera = self._cartera_aleatoria(fecha, rng)
-            coste = self._coste_cambio(cartera_ant, cartera)
-            retorno = self._retorno_cartera(cartera, fecha, fecha_sig)
+        hist_random = {}
+        hist_mc = {}
 
-            vp *= (1 - coste)
-            vp *= (1 + retorno)
+        for fecha in self.fechas_diarias:
+            datos_hoy = self.datos_por_fecha[fecha]
 
-            historial[fecha_sig] = vp
-            cartera_ant = cartera
+            self._cobrar_dividendos(cartera_random, datos_hoy)
+            self._cobrar_dividendos(cartera_mc, datos_hoy)
 
-        return pd.Series(historial).sort_index()
+            vp_random = mark_to_market(cartera_random, datos_hoy)
+            vp_mc = mark_to_market(cartera_mc, datos_hoy)
+
+            hist_random[fecha] = vp_random
+            hist_mc[fecha] = vp_mc
+
+            if fecha not in self.fechas_rebalanceo_set:
+                continue
+
+            fecha_i = self.fechas.get_loc(fecha)
+            pesos_random, pesos_mc = self._carteras_aleatorias_doble(fecha_i, rng)
+
+            self.VP = vp_random
+            cartera_random, _, vp_random = self._ajustar_cartera(cartera_random, datos_hoy, pesos_random)
+
+            self.VP = vp_mc
+            cartera_mc, _, vp_mc = self._ajustar_cartera(cartera_mc, datos_hoy, pesos_mc)
+
+            hist_random[fecha] = vp_random
+            hist_mc[fecha] = vp_mc
+
+        return pd.Series(hist_random).sort_index(), pd.Series(hist_mc).sort_index()
+
 
     def run_montecarlo(self, n_sims: int = 1000, benchmark: str | None = None) -> dict:
         series = [self._run_once(seed=i) for i in range(n_sims)]
-        df_sims = pd.concat(series, axis=1)
-        df_sims.columns = [f"sim_{i}" for i in range(n_sims)]
+
+        df_random = pd.concat([s[0] for s in series], axis=1)
+        df_mc = pd.concat([s[1] for s in series], axis=1)
+
+        df_random.columns = [f"sim_{i}" for i in range(n_sims)]
+        df_mc.columns = [f"sim_{i}" for i in range(n_sims)]
+
+        def resumen(df):
+            return {
+                "media": df.mean(axis=1),
+                "std": df.std(axis=1),
+                "p10": df.quantile(0.10, axis=1),
+                "p50": df.quantile(0.50, axis=1),
+                "p90": df.quantile(0.90, axis=1),
+                "todas": df,
+            }
 
         resultados = {
-            "media": df_sims.mean(axis=1),
-            "std": df_sims.std(axis=1),
-            "p10": df_sims.quantile(0.10, axis=1),
-            "p50": df_sims.quantile(0.50, axis=1),
-            "p90": df_sims.quantile(0.90, axis=1),
-            "todas": df_sims,
+            "pesos_random": resumen(df_random),
+            "pesos_mc": resumen(df_mc),
         }
 
         if benchmark:
-            df_bmk = self.proveedor.download_prices_weekly(
+            df_bmk = self.proveedor.download_prices_daily(
                 [benchmark],
                 self.start_date.strftime("%Y-%m-%d"),
                 self.end_date.strftime("%Y-%m-%d"),
             )
             df_bmk["Fecha"] = pd.to_datetime(df_bmk["Fecha"])
-            serie_bmk = (
-                df_bmk.set_index("Fecha")["Precio_Close"]
+
+            px = (
+                df_bmk.pivot(index="Fecha", columns="Ticker", values="Precio_Close")
                 .sort_index()
-                .reindex(self.fechas)
+                .reindex(df_random.index)
                 .ffill()
+                .bfill()
             )
-            serie_bmk = serie_bmk / serie_bmk.iloc[0] * self.nominal
-            resultados["benchmark"] = serie_bmk
+            div = (
+                df_bmk.pivot(index="Fecha", columns="Ticker", values="Dividendos")
+                .reindex(df_random.index)
+                .fillna(0.0)
+            )
+
+            ret = ((px + div) / px.shift(1) - 1).iloc[:, 0].fillna(0.0)
+            resultados["benchmark"] = self.nominal * (1 + ret).cumprod()
 
         return resultados
+
+
+    def _carteras_aleatorias_doble(self, fecha_i, rng):
+        fecha = self.fechas[fecha_i]
+        precios = self.px[fecha_i]
+
+        tickers = sorted(self.universo.get_universe_at_date(fecha))
+        idx = np.array([
+            self.ticker_to_i[t] for t in tickers
+            if t in self.ticker_to_i and np.isfinite(precios[self.ticker_to_i[t]])
+        ])
+
+        if len(idx) == 0:
+            return {}, {}
+
+        n = min(self.n_activos, len(idx))
+        elegidos = rng.choice(idx, size=n, replace=False)
+
+        pesos_random = self._generar_pesos(n, rng)
+        idx_mc, pesos_mc = self._pesos_montecarlo(elegidos, fecha_i, rng)
+
+        return (
+            {self.tickers[i]: float(w) for i, w in zip(elegidos, pesos_random)},
+            {self.tickers[i]: float(w) for i, w in zip(idx_mc, pesos_mc)}
+        )
+
+
+    def _pesos_montecarlo(self, idx, fecha_i, rng):
+        ini = max(0, fecha_i - 251)
+        ret = self.ret[ini:fecha_i + 1, :][:, idx]
+
+        n = ret.shape[1]
+        obs_validas = np.isfinite(ret).all(axis=1).sum()
+
+        if n < 2 or obs_validas < 2:
+            return idx, np.ones(n) / n
+
+        media = ret.mean(axis=0)
+        cov = np.cov(ret, rowvar=False)
+
+        if not np.isfinite(cov).all():
+            return idx, np.ones(n) / n
+
+        pesos = []
+
+        while sum(len(x) for x in pesos) < self.n_simulaciones_mc:
+            raw = rng.dirichlet(np.ones(n), size=self.n_simulaciones_mc)
+            w = self.peso_min + (1 - n * self.peso_min) * raw
+            ok = (w <= self.peso_max).all(axis=1)
+            pesos.append(w[ok])
+
+        pesos = np.vstack(pesos)[:self.n_simulaciones_mc]
+
+        ret_c = pesos @ media * 252
+        vol_c = np.sqrt(np.einsum("ij,jk,ik->i", pesos, cov, pesos)) * np.sqrt(252)
+        sharpe = np.divide(ret_c, vol_c, out=np.full_like(ret_c, -np.inf), where=vol_c > 0)
+
+        return idx, pesos[np.argmax(sharpe)]
+
