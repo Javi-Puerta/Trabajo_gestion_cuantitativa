@@ -696,3 +696,93 @@ def grafico_evolucion_drawdown(series, titulo="Evolución de la cartera y drawdo
     plt.show()
     return fig, (ax1, ax2)
 
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+def grafico_evolucion_drawdown_plotly(series, titulo="Evolución de la cartera y drawdown"):
+    cols = [c for c in ["Estrategia real", "STOXX 50"] if c in series.columns]
+    dd = series[cols].div(series[cols].cummax()).sub(1)
+
+    fondo = "#070A2D"
+    colores = {"Estrategia real": "#4F82FF", "STOXX 50": "#FFB84D"}
+
+    # 1. Crear la estructura base (equivalente a plt.subplots y gridspec_kw)
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.68, 0.32] # Aprox ratio 2.1 a 1
+    )
+
+    # 2. Trazos del NAV (Gráfico superior)
+    for col in cols:
+        # Dividimos entre 1M para facilitar el formateo del eje Y en formato estático
+        nav_millions = series[col] / 1_000_000 
+        fig.add_trace(
+            go.Scatter(
+                x=series.index, y=nav_millions, 
+                mode="lines", name=col,
+                line=dict(color=colores[col], width=2.7)
+            ),
+            row=1, col=1
+        )
+    
+    # Línea base del NAV inicial. Al usar iloc[0, 0], respetamos dinámicamente el valor de 
+    # arranque real de tu serie (sea el del 12 de marzo u otro) sin fijarlo estáticamente en 10M€.
+    nav_inicial = series.iloc[0, 0] / 1_000_000
+    fig.add_hline(y=nav_inicial, line_dash="dash", line_color="white", 
+                  line_width=1, opacity=0.35, row=1, col=1)
+
+    # 3. Trazos del Drawdown (Gráfico inferior)
+    for col in cols:
+        # Lógica para replicar el fill_between solo en la estrategia real
+        fill = 'tozeroy' if col == "Estrategia real" else 'none'
+        fillcolor = 'rgba(255, 59, 48, 0.28)' if col == "Estrategia real" else None
+        
+        fig.add_trace(
+            go.Scatter(
+                x=dd.index, y=dd[col], 
+                mode="lines", name=f"{col} ({dd[col].min():.2%})",
+                line=dict(color=colores[col], width=2.0),
+                fill=fill, fillcolor=fillcolor
+            ),
+            row=2, col=1
+        )
+
+    # Línea base de cero para el DD
+    fig.add_hline(y=0, line_color="white", line_width=1, opacity=0.65, row=2, col=1)
+
+    # 4. Configuración global del Layout (Fondos, título y leyenda)
+    fig.update_layout(
+        title=dict(text=titulo, font=dict(color="white", size=22), pad=dict(b=16)),
+        plot_bgcolor=fondo,
+        paper_bgcolor=fondo,
+        margin=dict(l=60, r=40, t=80, b=50), # Equivalente a plt.tight_layout()
+        legend=dict(
+            bgcolor="rgba(16, 21, 69, 0.82)", # "#101545" con transparencia
+            bordercolor="#4D5AA0", borderwidth=1,
+            font=dict(color="white", size=11),
+            # En Plotly, agrupar las dos leyendas suele quedar mejor arriba a la izquierda
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+        ),
+        hovermode="x unified" # Esto añade una línea vertical interactiva muy analítica
+    )
+
+    # 5. Configuración de Ejes (Equivalente a ax.tick_params, ax.grid, spines y set_major_formatter)
+    grid_style = dict(showgrid=True, gridcolor="rgba(255,255,255,0.12)", gridwidth=0.8)
+    axis_style = dict(tickfont=dict(color="white", size=11), showline=True, linecolor="#6D739C", linewidth=1)
+
+    fig.update_xaxes(**grid_style, **axis_style, row=1, col=1)
+    fig.update_xaxes(title_text="Fecha", title_font=dict(color="white", size=13), 
+                     **grid_style, **axis_style, row=2, col=1)
+
+    fig.update_yaxes(title_text="Valor cartera", title_font=dict(color="white", size=13),
+                     tickformat=".2f", ticksuffix=" M€", 
+                     **grid_style, **axis_style, row=1, col=1)
+                     
+    fig.update_yaxes(title_text="Drawdown", title_font=dict(color="white", size=13),
+                     tickformat=".0%", range=[dd.min().min() * 1.15, 0.003],
+                     **grid_style, **axis_style, row=2, col=1)
+
+    fig.show()
+    return fig
