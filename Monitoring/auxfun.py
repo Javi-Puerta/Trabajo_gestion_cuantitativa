@@ -6,6 +6,8 @@ import requests
 from io import StringIO
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 def get_eurostoxx50_tickers():
     url = 'https://en.wikipedia.org/wiki/EURO_STOXX_50'
@@ -162,6 +164,30 @@ def _datos_mercado(ops, fecha_fin, universo_tickers=()):
     return precios, dividendos, ops
 
 
+def _serie_benchmark(benchmark, fechas, start, end):
+    datos = yf.download(
+        benchmark,
+        start=(pd.to_datetime(start) - pd.Timedelta(days=7)).strftime("%Y-%m-%d"),
+        end=(pd.to_datetime(end) + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+    )
+
+    if datos.empty:
+        raise ValueError(f"No se han podido descargar datos del benchmark {benchmark}.")
+
+    serie = datos["Close"].squeeze()
+    serie.index = pd.to_datetime(serie.index).tz_localize(None)
+    fechas = pd.DatetimeIndex(pd.to_datetime(fechas)).tz_localize(None)
+
+    serie = serie.reindex(serie.index.union(fechas)).sort_index().ffill().reindex(fechas)
+
+    if serie.isna().any():
+        raise ValueError(f"Faltan precios del benchmark {benchmark} para alguna fecha.")
+
+    return serie
+
+
 def historico_valor_cartera(archivo, fecha_fin=None, capital_inicial=10_000_000,
                             hoja="Operativa", incluir_costes=True):
 
@@ -295,11 +321,12 @@ def pnl_por_activo(archivo, fecha_fin=None, capital_inicial=10_000_000,
 
 def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
                              capital_inicial=10_000_000, hoja="Operativa",
-                             incluir_costes=True, pesos_bmk=None):
+                             incluir_costes=True, pesos_bmk=None,
+                             benchmark="^STOXX50E"):
 
     ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
     precios, dividendos, ops = _datos_mercado(ops, fecha_fin, universo_tickers)
-    
+
     if pesos_bmk is None:
         pesos_bmk = calcular_pesos_bmk_actuales(universo_tickers)
 
@@ -308,6 +335,17 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
 
     fecha_valor = precios.index[precios.index <= fecha_fin].max()
     fechas_op = sorted(f for f in ops["fecha_trade"].unique() if f <= fecha_valor)
+
+    if len(fechas_op) == 0:
+        raise ValueError("No hay fechas de operación válidas para la atribución.")
+
+    fechas_bmk = sorted(set(fechas_op + [fecha_valor]))
+    serie_bmk = _serie_benchmark(
+        benchmark=benchmark,
+        fechas=fechas_bmk,
+        start=min(fechas_bmk),
+        end=max(fechas_bmk),
+    )
 
     pos = {}
     cash = float(capital_inicial)
@@ -330,7 +368,7 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
         f1 = fechas_op[i + 1] if i + 1 < len(fechas_op) else fecha_valor
         nav0 = cash + valor_posicion(f0)
 
-        if nav0 <= 0 or pd.isna(nav0):
+        if nav0 <= 0 or pd.isna(nav0) or f0 == f1:
             continue
 
         cash_sin_costes = cash
@@ -350,6 +388,8 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
 
         divs = dividendos.loc[(dividendos.index > f0) & (dividendos.index <= f1)]
 
+        r_bmk = float(serie_bmk.loc[f1] / serie_bmk.loc[f0] - 1)
+
         ret_universo = pd.Series({
             t: retorno_total(t, f0, f1, divs)
             for t in universo_tickers
@@ -357,13 +397,10 @@ def tabla_semanal_atribucion(archivo, universo_tickers, fecha_fin=None,
         }).dropna()
 
         pesos_periodo = pesos_bmk.reindex(ret_universo.index).dropna()
-
         if len(pesos_periodo):
             pesos_periodo = pesos_periodo / pesos_periodo.sum()
-            ret_universo = ret_universo.reindex(pesos_periodo.index)
-            r_bmk = float((pesos_periodo * ret_universo).sum())
         else:
-            r_bmk = 0.0
+            pesos_periodo = pd.Series(dtype=float)
 
         seleccion = 0.0
         pesos = 0.0
@@ -555,6 +592,7 @@ def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
         capital_inicial=capital_inicial,
         hoja=hoja,
         incluir_costes=incluir_costes,
+        benchmark=benchmark,
     )
 
     _, final = encadenar_atribucion(semanal, capital_inicial)
@@ -593,7 +631,10 @@ def series_diarias_cartera_bmks(archivo, universo_tickers, fecha_fin=None,
     exceso = retornos - rf_diario
 
     tabla_metricas = pd.DataFrame(index=series.columns)
-    tabla_metricas["Rentabilidad"] = series.iloc[-1] / series.iloc[0] - 1
+    tabla_metricas["Rentabilidad"] = [
+        series["Estrategia real"].iloc[-1] / capital_inicial - 1,
+        series["STOXX 50"].iloc[-1] / capital_inicial - 1,
+    ]
     tabla_metricas["Volatilidad"] = retornos.std() * np.sqrt(252)
     tabla_metricas["Max DD"] = (series / series.cummax() - 1).min()
     tabla_metricas["Sharpe"] = (exceso.mean() / retornos.std()) * np.sqrt(252)
@@ -696,8 +737,6 @@ def grafico_evolucion_drawdown(series, titulo="Evolución de la cartera y drawdo
     plt.show()
     return fig, (ax1, ax2)
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 def grafico_evolucion_drawdown_plotly(series, titulo="Evolución de la cartera y drawdown"):
     cols = [c for c in ["Estrategia real", "STOXX 50"] if c in series.columns]
