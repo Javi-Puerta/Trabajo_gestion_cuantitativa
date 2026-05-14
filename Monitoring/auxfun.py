@@ -142,6 +142,9 @@ def _datos_mercado(ops, fecha_fin, universo_tickers=()):
 
     if precios.empty:
         raise ValueError("yfinance no ha devuelto precios.")
+    
+    precios = precios.loc[:fecha_fin].copy()
+    dividendos = dividendos.reindex(precios.index).fillna(0.0)
 
     def siguiente_sesion(f):
         validas = precios.index[precios.index >= f]
