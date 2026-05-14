@@ -84,6 +84,7 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
         self.dias_retorno = dias_retorno
         self._retornos_hist: pd.DataFrame = pd.DataFrame()        
 
+
     def seleccionar(self, df_hoy, feature_cols, cartera, df_daily=None):
         datos = df_hoy.copy()
 
@@ -126,21 +127,37 @@ class EstrategiaMLMonteCarlo(EstrategiaBase):
         media = ret.mean().values
         cov   = ret.cov().values
 
-        best_sharpe, best_pesos = -np.inf, np.ones(n) / n
         rng = np.random.default_rng(seed=42)
-        for _ in range(self.n_simulaciones):
-            raw   = rng.dirichlet(np.ones(n))
-            pesos = self.peso_min + (1 - n * self.peso_min) * raw
-            pesos = np.clip(pesos, self.peso_min, self.peso_max)  # ← clip directo
-            pesos = pesos / pesos.sum()                           # ← renormalizar
-            ret_c  = float(pesos @ media) * 252
-            vol_c  = float(np.sqrt(pesos @ cov @ pesos)) * np.sqrt(252)
-            sharpe = ret_c / vol_c if vol_c > 0 else -np.inf
-            if sharpe > best_sharpe:
-                best_sharpe, best_pesos = sharpe, pesos
+        pesos = self._generar_pesos_mc(n, rng)
+
+        ret_c = pesos @ media * 252
+        vol_c = np.sqrt(np.einsum("ij,jk,ik->i", pesos, cov, pesos)) * np.sqrt(252)
+
+        sharpe = np.divide(
+            ret_c,
+            vol_c,
+            out=np.full_like(ret_c, -np.inf),
+            where=vol_c > 0,
+        )
+
+        best_pesos = pesos[np.argmax(sharpe)]
 
         return {t: float(best_pesos[i]) for i, t in enumerate(tickers_mc)}
-    
+
+
+    def _generar_pesos_mc(self, n: int, rng) -> np.ndarray:
+        if n * self.peso_max < 1 or n * self.peso_min > 1:
+            return np.tile(np.ones(n) / n, (self.n_simulaciones, 1))
+
+        aceptados = []
+
+        while sum(len(x) for x in aceptados) < self.n_simulaciones:
+            raw = rng.dirichlet(np.ones(n), size=self.n_simulaciones)
+            pesos = self.peso_min + (1 - n * self.peso_min) * raw
+            ok = (pesos <= self.peso_max).all(axis=1)
+            aceptados.append(pesos[ok])
+
+        return np.vstack(aceptados)[:self.n_simulaciones]
 
 class EstrategiaMLEquiponderadaMacro(EstrategiaMLEquiponderada):
     def __init__(self, modelo, n_activos_obj, umbral_salida,
