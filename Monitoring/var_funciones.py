@@ -1,378 +1,310 @@
-"""
-var_funciones.py
-================
-Funciones auxiliares para el cálculo de VaR (Value at Risk) y
-TailVaR / CVaR (Conditional Value at Risk / Expected Shortfall).
-
-Incluye métodos paramétrico (normal) e histórico, tanto para el cálculo
-presente (a fecha actual) como para series temporales rolling (histórico).
-
-Horizonte por defecto: 5 días de trading (1 semana).
-"""
-
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
-from scipy import stats
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
-from typing import Optional, List
+from scipy.stats import norm
 
 
-# ---------------------------------------------------------------------------
-# Funciones base
-# ---------------------------------------------------------------------------
-
-def calcular_var_parametrico(retornos: pd.Series, nivel_confianza: float = 0.95,
-                              horizonte: int = 5) -> float:
-    """
-    VaR paramétrico asumiendo distribución normal.
-
-    Parámetros
-    ----------
-    retornos : pd.Series
-        Serie de retornos diarios (no porcentuales, p.ej. 0.01 = 1 %).
-    nivel_confianza : float
-        Nivel de confianza (0.95 → 95 %).
-    horizonte : int
-        Número de días de trading del horizonte (5 = 1 semana).
-
-    Devuelve
-    --------
-    float
-        VaR como pérdida positiva (p.ej. 0.045 = 4.5 %).
-    """
-    retornos = retornos.dropna()
-    if len(retornos) < 5:
-        return np.nan
-
-    mu_diaria  = retornos.mean()
-    sigma_diaria = retornos.std(ddof=1)
-
-    # Escalado al horizonte
-    mu_h    = mu_diaria * horizonte
-    sigma_h = sigma_diaria * np.sqrt(horizonte)
-
-    z = stats.norm.ppf(1 - nivel_confianza)
-    var = -(mu_h + z * sigma_h)
-    return float(max(var, 0.0))
+TEMA_PRESENTACION = {
+    "fondo": "#000A26", "panel": "#06133A", "header": "#159A9C",
+    "lineas": "#27456F", "blanco": "#FFFFFF",
+    "positivo": "#2FE6D0", "negativo": "#FF6B6B",
+}
 
 
-def calcular_tailvar_parametrico(retornos: pd.Series, nivel_confianza: float = 0.95,
-                                  horizonte: int = 5) -> float:
-    """
-    TailVaR / CVaR / Expected Shortfall paramétrico (distribución normal).
-
-    Parámetros
-    ----------
-    retornos : pd.Series
-        Serie de retornos diarios.
-    nivel_confianza : float
-        Nivel de confianza (0.95 → 95 %).
-    horizonte : int
-        Número de días de trading del horizonte (5 = 1 semana).
-
-    Devuelve
-    --------
-    float
-        CVaR como pérdida positiva.
-    """
-    retornos = retornos.dropna()
-    if len(retornos) < 5:
-        return np.nan
-
-    mu_diaria    = retornos.mean()
-    sigma_diaria = retornos.std(ddof=1)
-
-    mu_h    = mu_diaria * horizonte
-    sigma_h = sigma_diaria * np.sqrt(horizonte)
-
-    alpha = 1 - nivel_confianza
-    z = stats.norm.ppf(alpha)
-    phi_z = stats.norm.pdf(z)
-
-    cvar = -(mu_h - sigma_h * phi_z / alpha)
-    return float(max(cvar, 0.0))
+def pesos_ewma(n, lambda_=0.94):
+    w = (1 - lambda_) * lambda_ ** np.arange(n - 1, -1, -1)
+    return w / w.sum()
 
 
-def calcular_var_historico(retornos: pd.Series, nivel_confianza: float = 0.95,
-                            horizonte: int = 5) -> float:
-    """
-    VaR histórico (simulación histórica) usando retornos acumulados a `horizonte` días.
-
-    Parámetros
-    ----------
-    retornos : pd.Series
-        Serie de retornos diarios.
-    nivel_confianza : float
-        Nivel de confianza (0.95 → 95 %).
-    horizonte : int
-        Número de días de trading del horizonte (5 = 1 semana).
-
-    Devuelve
-    --------
-    float
-        VaR histórico como pérdida positiva.
-    """
-    retornos = retornos.dropna()
-    if len(retornos) < horizonte + 1:
-        return np.nan
-
-    # Retornos acumulados a `horizonte` días (log-retornos sumados)
-    log_ret = np.log1p(retornos)
-    ret_h   = log_ret.rolling(horizonte).sum().dropna()
-    ret_h   = np.expm1(ret_h)  # volver a retornos simples
-
-    var = -np.percentile(ret_h, (1 - nivel_confianza) * 100)
-    return float(max(var, 0.0))
+def media_ewma(retornos, lambda_=0.94):
+    retornos = retornos.dropna(axis=1, how="all").fillna(0.0)
+    w = pesos_ewma(len(retornos), lambda_)
+    return pd.Series(w @ retornos.values, index=retornos.columns)
 
 
-def calcular_tailvar_historico(retornos: pd.Series, nivel_confianza: float = 0.95,
-                                horizonte: int = 5) -> float:
-    """
-    TailVaR / CVaR histórico (media de pérdidas en la cola) usando retornos
-    acumulados a `horizonte` días.
+def cov_ewma(retornos, lambda_=0.94, centrar=True):
+    retornos = retornos.dropna(axis=1, how="all").fillna(0.0)
 
-    Parámetros
-    ----------
-    retornos : pd.Series
-        Serie de retornos diarios.
-    nivel_confianza : float
-        Nivel de confianza (0.95 → 95 %).
-    horizonte : int
-        Número de días de trading del horizonte (5 = 1 semana).
+    if len(retornos) < 2:
+        return pd.DataFrame()
 
-    Devuelve
-    --------
-    float
-        CVaR histórico como pérdida positiva.
-    """
-    retornos = retornos.dropna()
-    if len(retornos) < horizonte + 1:
-        return np.nan
+    w = pesos_ewma(len(retornos), lambda_)
+    x = retornos.values
 
-    log_ret = np.log1p(retornos)
-    ret_h   = log_ret.rolling(horizonte).sum().dropna()
-    ret_h   = np.expm1(ret_h)
+    if centrar:
+        mu = w @ x
+        x = x - mu
 
-    umbral = np.percentile(ret_h, (1 - nivel_confianza) * 100)
-    cola   = ret_h[ret_h <= umbral]
-    if len(cola) == 0:
-        return np.nan
+    cov = x.T @ (x * w[:, None])
 
-    cvar = -cola.mean()
-    return float(max(cvar, 0.0))
+    return pd.DataFrame(cov, index=retornos.columns, columns=retornos.columns)
 
 
-# ---------------------------------------------------------------------------
-# Funciones de alto nivel
-# ---------------------------------------------------------------------------
+def riesgo_normal_posicion(
+    pesos,
+    retornos_hist,
+    nav,
+    nivel=0.99,
+    horizonte=20,
+    lambda_=0.94,
+    usar_media=True,
+):
+    pesos = pesos[pesos.abs() > 1e-12].dropna()
+    tickers = pesos.index.intersection(retornos_hist.columns)
 
-def calcular_var_presente(retornos: pd.Series,
-                           niveles: Optional[List[float]] = None,
-                           horizonte: int = 5) -> pd.DataFrame:
-    """
-    Calcula VaR y TailVaR presentes (paramétrico e histórico) para varios
-    niveles de confianza.
+    cols_nan = {
+        "VaR %": np.nan, "VaR €": np.nan,
+        "TailVaR %": np.nan, "TailVaR €": np.nan,
+        "EaR %": np.nan, "EaR €": np.nan,
+        "EaR/VaR": np.nan,
+        "Volatilidad 1d": np.nan,
+        "Volatilidad horizonte": np.nan,
+        "Retorno esperado horizonte": np.nan,
+    }
 
-    Parámetros
-    ----------
-    retornos : pd.Series
-        Serie de retornos diarios de la cartera.
-    niveles : list of float, optional
-        Niveles de confianza. Por defecto [0.95, 0.99].
-    horizonte : int
-        Horizonte en días de trading (5 = 1 semana).
+    if len(tickers) < 2 or len(retornos_hist) < 20:
+        return cols_nan
 
-    Devuelve
-    --------
-    pd.DataFrame
-        Tabla con columnas [VaR Param, TailVaR Param, VaR Hist, TailVaR Hist]
-        e índice = niveles de confianza.
-    """
-    if niveles is None:
-        niveles = [0.95, 0.99]
+    ret = retornos_hist[tickers]
+    w = pesos[tickers].values
 
+    mu_1d = media_ewma(ret, lambda_=lambda_).values if usar_media else np.zeros(len(tickers))
+    cov = cov_ewma(ret, lambda_=lambda_, centrar=usar_media).values
+
+    mu_p_1d = float(w @ mu_1d)
+    vol_1d = float(np.sqrt(w @ cov @ w))
+
+    mu_h = mu_p_1d * horizonte
+    vol_h = vol_1d * np.sqrt(horizonte)
+
+    alpha = 1 - nivel
+    z_inf = norm.ppf(alpha)
+    z_sup = norm.ppf(nivel)
+
+    q_inf = mu_h + z_inf * vol_h
+    q_sup = mu_h + z_sup * vol_h
+
+    var_pct = max(-q_inf, 0.0)
+    ear_pct = max(q_sup, 0.0)
+
+    tail_return = mu_h - vol_h * norm.pdf(z_inf) / alpha
+    tailvar_pct = max(-tail_return, 0.0)
+
+    ratio = ear_pct / var_pct if var_pct > 0 else np.nan
+
+    return {
+        "VaR %": float(var_pct),
+        "VaR €": float(nav * var_pct),
+        "TailVaR %": float(tailvar_pct),
+        "TailVaR €": float(nav * tailvar_pct),
+        "EaR %": float(ear_pct),
+        "EaR €": float(nav * ear_pct),
+        "EaR/VaR": float(ratio),
+        "Volatilidad 1d": float(vol_1d),
+        "Volatilidad horizonte": float(vol_h),
+        "Retorno esperado horizonte": float(mu_h),
+    }
+
+
+def riesgo_benchmark_actual(
+    pesos_bmk,
+    retornos_activos,
+    fecha,
+    nav,
+    ventana=550,
+    nivel=0.99,
+    horizonte=20,
+    lambda_=0.94,
+    min_obs=250,
+    usar_media=True,
+):
+    hist = retornos_activos.loc[retornos_activos.index < fecha].tail(ventana)
+
+    if len(hist) < min_obs:
+        raise ValueError(
+            f"No hay suficiente histórico para el benchmark: {len(hist)} observaciones."
+        )
+
+    riesgo = riesgo_normal_posicion(
+        pesos=pesos_bmk,
+        retornos_hist=hist,
+        nav=nav,
+        nivel=nivel,
+        horizonte=horizonte,
+        lambda_=lambda_,
+        usar_media=usar_media,
+    )
+
+    return pd.Series(riesgo, name="Benchmark")
+
+
+def calcular_riesgo_diario_posiciones(
+    pesos,
+    retornos_activos,
+    nav,
+    ventana=550,
+    nivel=0.99,
+    horizonte=20,
+    lambda_=0.94,
+    min_obs=100,
+    usar_media=True,
+):
     filas = []
-    for nc in niveles:
-        filas.append({
-            "Nivel confianza": f"{nc:.0%}",
-            "VaR Param":       calcular_var_parametrico(retornos, nc, horizonte),
-            "TailVaR Param":   calcular_tailvar_parametrico(retornos, nc, horizonte),
-            "VaR Hist":        calcular_var_historico(retornos, nc, horizonte),
-            "TailVaR Hist":    calcular_tailvar_historico(retornos, nc, horizonte),
-        })
+    fechas = pesos.index.intersection(nav.index)
 
-    df = pd.DataFrame(filas).set_index("Nivel confianza")
-    return df
+    for fecha in fechas:
+        pesos_fecha = pesos.loc[fecha]
 
+        if pesos_fecha.abs().sum() <= 1e-12:
+            continue
 
-def calcular_var_rolling(retornos: pd.Series,
-                          ventana: int = 20,
-                          nivel_confianza: float = 0.95,
-                          horizonte: int = 5) -> pd.DataFrame:
-    """
-    Serie temporal (rolling) de VaR y TailVaR para ver la evolución histórica.
+        hist = retornos_activos.loc[retornos_activos.index < fecha].tail(ventana)
 
-    Parámetros
-    ----------
-    retornos : pd.Series
-        Serie de retornos diarios de la cartera.
-    ventana : int
-        Tamaño de la ventana rolling en días de trading.
-    nivel_confianza : float
-        Nivel de confianza (0.95 → 95 %).
-    horizonte : int
-        Horizonte en días de trading (5 = 1 semana).
+        if len(hist) < min_obs:
+            continue
 
-    Devuelve
-    --------
-    pd.DataFrame
-        Columnas: [VaR Param, TailVaR Param, VaR Hist, TailVaR Hist].
-    """
-    resultados = {
-        "VaR Param":     [],
-        "TailVaR Param": [],
-        "VaR Hist":      [],
-        "TailVaR Hist":  [],
-    }
-    fechas = []
+        fila = {
+            "Fecha": fecha,
+            "NAV": nav.loc[fecha],
+            "Peso invertido": pesos_fecha.abs().sum(),
+        }
 
-    for i in range(ventana, len(retornos) + 1):
-        ventana_ret = retornos.iloc[i - ventana: i]
-        fecha = retornos.index[i - 1]
+        fila.update(
+            riesgo_normal_posicion(
+                pesos=pesos_fecha,
+                retornos_hist=hist,
+                nav=nav.loc[fecha],
+                nivel=nivel,
+                horizonte=horizonte,
+                lambda_=lambda_,
+                usar_media=usar_media,
+            )
+        )
 
-        resultados["VaR Param"].append(
-            calcular_var_parametrico(ventana_ret, nivel_confianza, horizonte))
-        resultados["TailVaR Param"].append(
-            calcular_tailvar_parametrico(ventana_ret, nivel_confianza, horizonte))
-        resultados["VaR Hist"].append(
-            calcular_var_historico(ventana_ret, nivel_confianza, horizonte))
-        resultados["TailVaR Hist"].append(
-            calcular_tailvar_historico(ventana_ret, nivel_confianza, horizonte))
-        fechas.append(fecha)
+        filas.append(fila)
 
-    return pd.DataFrame(resultados, index=pd.DatetimeIndex(fechas))
+    if not filas:
+        return pd.DataFrame()
+
+    return pd.DataFrame(filas).set_index("Fecha")
 
 
-# ---------------------------------------------------------------------------
-# Visualización
-# ---------------------------------------------------------------------------
+def resumen_riesgo(df_riesgo, vol_cartera=None, riesgo_bmk=None, vol_bmk=None):
+    cols = [
+        "VaR %",
+        "TailVaR %",
+        "EaR %",
+        "EaR/VaR",
+    ]
 
-def grafico_var_historico(df_rolling: pd.DataFrame,
-                           nav: pd.Series,
-                           nivel_confianza: float = 0.95,
-                           horizonte: int = 5,
-                           titulo: str = "VaR y TailVaR — Evolución histórica") -> None:
-    """
-    Gráfico premium con la evolución del NAV, VaR rolling y TailVaR rolling.
+    cols = [c for c in cols if c in df_riesgo.columns]
 
-    Parámetros
-    ----------
-    df_rolling : pd.DataFrame
-        Resultado de `calcular_var_rolling()`.
-    nav : pd.Series
-        Serie con el valor de la cartera (para el gráfico superior).
-    nivel_confianza : float
-        Nivel de confianza usado (para la leyenda).
-    horizonte : int
-        Horizonte en días (para el título).
-    titulo : str
-        Título del gráfico.
-    """
-    fondo = "#070A2D"
-    colores = {
-        "VaR Param":     "#4F82FF",
-        "TailVaR Param": "#2FE6D0",
-        "VaR Hist":      "#FFB84D",
-        "TailVaR Hist":  "#FF3B30",
-    }
+    resumen = pd.DataFrame({
+        "Actual": df_riesgo[cols].iloc[-1],
+        "Medio": df_riesgo[cols].mean(),
+    })
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(13.5, 9), dpi=150, sharex=True,
-        gridspec_kw={"height_ratios": [1.6, 2.4], "hspace": 0.06}
-    )
-    fig.patch.set_facecolor(fondo)
+    if riesgo_bmk is not None:
+        resumen["Benchmark"] = riesgo_bmk.reindex(cols)
 
-    for ax in (ax1, ax2):
-        ax.set_facecolor(fondo)
-        ax.grid(True, color="white", alpha=0.10, linewidth=0.7)
-        ax.tick_params(colors="white", labelsize=10)
-        for sp in ax.spines.values():
-            sp.set_color("#3D4280")
+    resumen.loc["Volatilidad anualizada", "Actual"] = vol_cartera
+    resumen.loc["Volatilidad anualizada", "Medio"] = np.nan
 
-    # --- Panel superior: NAV ---
-    nav_alineado = nav.reindex(nav.index.union(df_rolling.index)).ffill()
-    nav_alineado = nav_alineado.reindex(df_rolling.index)
+    if riesgo_bmk is not None:
+        resumen.loc["Volatilidad anualizada", "Benchmark"] = vol_bmk
 
-    ax1.plot(nav_alineado.index, nav_alineado / 1e6,
-             color="#4F82FF", linewidth=2.2, label="NAV (M€)")
-    ax1.set_ylabel("Valor cartera (M€)", color="white", fontsize=11)
-    ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.2f} M€"))
-    leg1 = ax1.legend(loc="upper left", frameon=True, fontsize=9)
-    leg1.get_frame().set_facecolor("#101545")
-    leg1.get_frame().set_edgecolor("#4D5AA0")
-    for t in leg1.get_texts():
-        t.set_color("white")
+    return resumen
 
-    # --- Panel inferior: VaR / TailVaR ---
-    semanas = horizonte // 5
-    h_str = f"{semanas} semana" if semanas == 1 else f"{semanas} semanas"
-    nc_str = f"{nivel_confianza:.0%}"
 
-    for col, color in colores.items():
-        if col in df_rolling.columns:
-            ax2.plot(df_rolling.index, df_rolling[col] * 100,
-                     color=color, linewidth=2.0, label=f"{col} ({nc_str}, {h_str})")
+def vol_anualizada_periodo(retornos, periods_per_year=252):
+    r = retornos.dropna()
+    return np.nan if len(r) < 2 else float(r.std(ddof=1) * np.sqrt(periods_per_year))
 
-    ax2.set_ylabel("Pérdida estimada (%)", color="white", fontsize=11)
-    ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1f}%"))
-    leg2 = ax2.legend(loc="upper left", frameon=True, fontsize=9, ncol=2)
-    leg2.get_frame().set_facecolor("#101545")
-    leg2.get_frame().set_edgecolor("#4D5AA0")
-    for t in leg2.get_texts():
-        t.set_color("white")
 
-    ax1.set_title(titulo, color="white", fontsize=17, fontweight="bold", pad=12)
-    ax2.set_xlabel("Fecha", color="white", fontsize=11)
+def _signo_metrica_riesgo(idx):
+    idx = str(idx)
+    if idx.startswith(("VaR", "TailVaR")):
+        return -1
+    if idx.startswith("EaR") and idx != "EaR/VaR":
+        return 1
+    return 0
 
-    plt.tight_layout()
+
+def formatear_resumen_riesgo(resumen):
+    out = resumen.copy().astype(object)
+    for idx in out.index:
+        signo = _signo_metrica_riesgo(idx)
+        for col in out.columns:
+            v = resumen.loc[idx, col]
+            if pd.isna(v):
+                out.loc[idx, col] = ""
+                continue
+
+            x = signo * abs(float(v)) if signo else float(v)
+
+            if str(idx).endswith("%") or str(idx).startswith(("Volatilidad", "Retorno esperado")):
+                out.loc[idx, col] = f"{x:+.2%}" if signo else f"{x:.2%}"
+            elif str(idx).endswith("€"):
+                out.loc[idx, col] = f"{x / 1000:+,.1f} k€" if signo else f"{x / 1000:,.1f} k€"
+            elif idx == "EaR/VaR":
+                out.loc[idx, col] = f"{float(v):.2f}x"
+            else:
+                out.loc[idx, col] = f"{x:+.2f}" if signo else f"{x:.2f}"
+
+    return out
+
+
+def tabla_mpl_presentacion(df, titulo=None, figsize=(7.2, 3.0), dpi=220, bbox=(0.04, 0.07, 0.92, 0.72),
+                           anchos=None, columnas_signo=(), tema=None, fontsize=9.5):
+    tema = {**TEMA_PRESENTACION, **(tema or {})}
+    df = df.copy().astype(str)
+    columnas_signo = set(columnas_signo)
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    fig.patch.set_facecolor(tema["fondo"])
+    ax.set_facecolor(tema["fondo"])
+    ax.axis("off")
+
+    tabla = ax.table(cellText=df.values, colLabels=df.columns, cellLoc="center", colLoc="center", bbox=bbox)
+    tabla.auto_set_font_size(False)
+    tabla.set_fontsize(fontsize)
+    tabla.scale(0.92, 1.45)
+
+    for (fila, col), celda in tabla.get_celld().items():
+        celda.set_edgecolor(tema["lineas"])
+        celda.set_linewidth(0.7)
+        if anchos and col in anchos:
+            celda.set_width(anchos[col])
+        if fila == 0:
+            celda.set_facecolor(tema["header"])
+            celda.get_text().set_color(tema["blanco"])
+            celda.get_text().set_weight("bold")
+        else:
+            celda.set_facecolor(tema["panel"])
+            celda.get_text().set_weight("bold")
+            valor = str(df.iloc[fila - 1, col])
+            if df.columns[col] in columnas_signo and valor.startswith("+"):
+                color = tema["positivo"]
+            elif df.columns[col] in columnas_signo and valor.startswith("-"):
+                color = tema["negativo"]
+            else:
+                color = tema["blanco"]
+            celda.get_text().set_color(color)
+
+    if titulo:
+        ax.text(0.5, 0.88, titulo, ha="center", va="bottom", color=tema["blanco"],
+                fontsize=14, fontweight="bold", transform=ax.transAxes)
+    plt.tight_layout(pad=0.25)
     plt.show()
+    return fig, ax
 
 
-def formatear_tabla_presente(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
-    """
-    Da formato visual (Styler) a la tabla de VaR/TailVaR presente.
-
-    Parámetros
-    ----------
-    df : pd.DataFrame
-        Resultado de `calcular_var_presente()`.
-
-    Devuelve
-    --------
-    pd.io.formats.style.Styler
-        Tabla con formato de porcentaje y colores.
-    """
-    def pct(x):
-        return f"{x:.2%}" if pd.notna(x) else "N/A"
-
-    return (
-        df.style
-        .format(pct)
-        .set_caption("VaR y TailVaR presentes")
-        .set_table_styles([
-            {"selector": "th",
-             "props": [("background-color", "#28669A"), ("color", "white"),
-                       ("font-weight", "bold"), ("text-align", "center"),
-                       ("border", "1px solid #8AA6C1")]},
-            {"selector": "td",
-             "props": [("background-color", "white"), ("color", "black"),
-                       ("font-weight", "bold"), ("text-align", "center"),
-                       ("border", "1px solid #E0E0E0"), ("padding", "10px")]},
-            {"selector": "caption",
-             "props": [("caption-side", "top"), ("font-weight", "bold"),
-                       ("font-size", "14px"), ("color", "#1E2A4A")]},
-        ])
-    )
+def tabla_resumen_riesgo_presentacion(resumen, titulo="Métricas de riesgo"):
+    df = formatear_resumen_riesgo(resumen).reset_index().rename(columns={"index": "Métrica"})
+    df["Métrica"] = df["Métrica"].replace({
+        "VaR %": "VaR", "TailVaR %": "TailVaR", "EaR %": "EaR",
+        "Volatilidad anualizada": "Vol. anualizada",
+    })
+    anchos = {0: 0.34, **{i: 0.22 for i in range(1, df.shape[1])}}
+    return tabla_mpl_presentacion(df, titulo=titulo, figsize=(7.4, 3.0), bbox=(0.04, 0.07, 0.92, 0.72),
+                                  anchos=anchos, columnas_signo=df.columns[1:], fontsize=9.6)
