@@ -4,6 +4,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
+from sklearn.ensemble import AdaBoostClassifier
 from sklearn.model_selection import GridSearchCV, BaseCrossValidator
 
 class ModeloBase(ABC):
@@ -40,7 +41,8 @@ class RandomForestModel(ModeloBase):
             "min_samples_leaf": [0.01, 0.05], "max_features": ["sqrt", 0.8],
             "class_weight": [{0:1, 1:3}, {0:1, 1:5}]
         }
-    
+
+
 class XGBoostModel(ModeloBase):
     def __init__(self, random_state: int = 42, n_splits=5):
         self.n_splits = n_splits
@@ -53,6 +55,17 @@ class XGBoostModel(ModeloBase):
             "colsample_bytree": [0.7, 1.0],   # ← fracción de features por árbol, equivalente a max_features en RF
             "scale_pos_weight": [3, 5, 10],   # ← equivalente a class_weight en RF, importante con clases desbalanceadas
         }
+
+
+class AdaBoostModel(ModeloBase):
+    def __init__(self, random_state: int = 42, n_splits=5):
+        self.n_splits = n_splits
+        self.clf = AdaBoostClassifier(random_state=random_state)
+        self.param_grid = {
+            "n_estimators": [100, 200, 300],
+            "learning_rate": [0.01, 0.1, 0.2]
+        }
+
 
 class WalkForwardCV(BaseCrossValidator):
     '''Implementación de cross validation para series temporales. Divide los datos en n_splits partes,

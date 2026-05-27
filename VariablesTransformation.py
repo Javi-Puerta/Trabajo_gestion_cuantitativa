@@ -123,10 +123,10 @@ class FeatureEngineer:
         df = df.drop(columns=["Retorno_1W_indice"])
 
         # Bollinger (log precio respecto a cada banda)
-        df["Log_Precio_Boll_Upper"] = df.groupby("Ticker")["Precio_Close"].transform(
-            lambda x: np.log(x / calculate_bollinger(x, period=20)[0]))
-        df["Log_Precio_Boll_Lower"] = df.groupby("Ticker")["Precio_Close"].transform(
-            lambda x: np.log(x / calculate_bollinger(x, period=20)[1]))
+        boll_up = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_bollinger(x, period=20)[0])
+        boll_low = df.groupby("Ticker")["Precio_Close"].transform(lambda x: calculate_bollinger(x, period=20)[1])
+        df["Log_Precio_Boll_Upper"] = np.log((df["Precio_Close"] / boll_up).where(boll_up > 0))
+        df["Log_Precio_Boll_Lower"] = np.log((df["Precio_Close"] / boll_low).where(boll_low > 0))
 
         # Target: el retorno la semana siguiente. Luego se convertirá a clasificación según el criterio elegido.
         df["Retorno_Next_Week"] = df.groupby("Ticker")["Retorno_1W"].shift(-1)
@@ -171,3 +171,4 @@ class FeatureEngineer:
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
 
         return df.reset_index(drop=True)
+

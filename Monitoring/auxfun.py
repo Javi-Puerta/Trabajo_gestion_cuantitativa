@@ -7,11 +7,32 @@ from io import StringIO
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-
+# Este tema es para la presentación
 TEMA_PRESENTACION = {
     "fondo": "#070A2D", "panel": "#06133A", "header": "#28669A",
     "lineas": "#27456F", "blanco": "#FFFFFF", "positivo": "#2FE6D0",
     "negativo": "#FF6B6B", "naranja": "#FFB84D", "azul": "#4F82FF",
+}
+
+# Este tema es para la memoria del proyecto
+TEMA_MEMORIA = {
+    "fondo": "#FFFFFF",
+    "panel": "#F6F8FB",
+    "header": "#1F4E79",
+
+    "texto": "#111827",
+    "texto_suave": "#4B5563",
+    "blanco": "#FFFFFF",
+
+    "lineas": "#C8D2E0",
+    "grid": "#E5E7EB",
+
+    "azul": "#2563EB",
+    "naranja": "#D97706",
+
+    "positivo": "#059669",
+    "negativo": "#DC2626",
+    "destacado": "#0F766E",
 }
 
 
@@ -250,7 +271,7 @@ def pnl_por_activo(archivo, fecha_fin=None, capital_inicial=10_000_000, hoja="Op
     ax.set_title("P&L por activo", color="white", fontsize=20, fontweight="bold", pad=14)
     ax.set_xlabel("P&L neto (€)", color="white", fontsize=12)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f} €"))
-    _estilizar_ejes_dark(ax)
+    _estilizar_ejes(ax, TEMA_PRESENTACION)
 
     leg = ax.legend(loc="lower right", frameon=True, fontsize=14)
     _estilizar_leyenda(leg)
@@ -407,7 +428,7 @@ def _series_y_metricas(archivo, semanal, final, fecha_fin=None, capital_inicial=
     fecha_fin_real = _fecha_fin_real(semanal)
     hist = historico_valor_cartera(archivo, fecha_fin, capital_inicial, hoja, incluir_costes)
     cartera = hist.loc[:fecha_fin_real, "Valor cartera"].copy()
-    cartera.name = "Estrategia real"
+    cartera.name = "Estrategia"
 
     datos_bmk = yf.download(benchmark, start=cartera.index.min().strftime("%Y-%m-%d"),
                             end=(fecha_fin_real + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
@@ -417,7 +438,7 @@ def _series_y_metricas(archivo, semanal, final, fecha_fin=None, capital_inicial=
     bmk.name = "STOXX 50"
 
     series = pd.concat([cartera, bmk], axis=1).dropna(how="all")
-    if abs(series["Estrategia real"].iloc[-1] - final["NAV cartera"]) > 1:
+    if abs(series["Estrategia"].iloc[-1] - final["NAV cartera"]) > 1:
         raise ValueError("La cartera diaria no cuadra con el NAV final de la atribución.")
 
     retornos = series.pct_change().dropna()
@@ -536,53 +557,69 @@ def tabla_metricas_presentacion(tabla_metricas, metricas=("Rentabilidad", "Volat
                                   anchos=anchos, columnas_signo=[], fontsize=9.6)
 
 
-def _estilizar_ejes_dark(ax):
-    ax.tick_params(colors="white", labelsize=11)
-    ax.grid(True, color="white", alpha=0.12, linewidth=0.8)
+def _estilizar_ejes(ax, tema=None):
+    tema = {**TEMA_PRESENTACION, **(tema or {})}
+    texto = tema.get("texto", tema["blanco"])
+    grid = tema.get("grid", tema["blanco"])
+    alpha_grid = 1.0 if tema["fondo"] == "#FFFFFF" else 0.12
+
+    ax.tick_params(colors=texto, labelsize=11)
+    ax.grid(True, color=grid, alpha=alpha_grid, linewidth=0.8)
     for s in ax.spines.values():
-        s.set_color("#6D739C")
+        s.set_color(tema["lineas"])
 
 
-def _estilizar_leyenda(leg):
-    leg.get_frame().set_facecolor("#101545")
-    leg.get_frame().set_edgecolor("#4D5AA0")
-    leg.get_frame().set_alpha(0.82)
+def _estilizar_leyenda(leg, tema=None):
+    tema = {**TEMA_PRESENTACION, **(tema or {})}
+    texto = tema.get("texto", tema["blanco"])
+
+    leg.get_frame().set_facecolor(tema["panel"])
+    leg.get_frame().set_edgecolor(tema["lineas"])
+    leg.get_frame().set_alpha(0.92)
     for t in leg.get_texts():
-        t.set_color("white")
+        t.set_color(texto)
 
 
-def grafico_evolucion_drawdown(series, titulo="Evolución de la cartera y drawdown"):
-    cols = [c for c in ["Estrategia real", "STOXX 50"] if c in series.columns]
-    dd, tema = series[cols].div(series[cols].cummax()).sub(1), TEMA_PRESENTACION
-    colores = {"Estrategia real": tema["azul"], "STOXX 50": tema["naranja"]}
+def grafico_evolucion_drawdown(series, titulo="Evolución de la cartera y drawdown", tema=None):
+    tema = {**TEMA_PRESENTACION, **(tema or {})}
+    texto = tema.get("texto", tema["blanco"])
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13.5, 8), dpi=180, sharex=True,
-                                   gridspec_kw={"height_ratios": [2.1, 1], "hspace": 0.08})
+    cols = [c for c in ["Estrategia", "STOXX 50"] if c in series.columns]
+    dd = series[cols].div(series[cols].cummax()).sub(1)
+    colores = {"Estrategia": tema["azul"], "STOXX 50": tema["naranja"]}
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(13.5, 8), dpi=180, sharex=True,
+        gridspec_kw={"height_ratios": [2.1, 1], "hspace": 0.08}
+    )
     fig.patch.set_facecolor(tema["fondo"])
+
     for ax in (ax1, ax2):
         ax.set_facecolor(tema["fondo"])
-        _estilizar_ejes_dark(ax)
+        _estilizar_ejes(ax, tema)
 
     for col in cols:
         ax1.plot(series.index, series[col], color=colores[col], linewidth=2.7, label=col)
         ax2.plot(dd.index, dd[col], color=colores[col], linewidth=2.0, label=f"{col} ({dd[col].min():.2%})")
 
-    if "Estrategia real" in dd:
-        ax2.fill_between(dd.index, dd["Estrategia real"], 0, color="#FF3B30", alpha=0.28)
-    ax1.axhline(series.iloc[0, 0], color="white", linestyle="--", linewidth=1, alpha=0.35)
-    ax2.axhline(0, color="white", linewidth=1, alpha=0.65)
+    if "Estrategia" in dd:
+        ax2.fill_between(dd.index, dd["Estrategia"], 0, color=tema["negativo"], alpha=0.18)
 
-    ax1.set_title(titulo, color="white", fontsize=22, fontweight="bold", pad=16)
-    ax1.set_ylabel("Valor cartera", color="white", fontsize=13)
-    ax2.set_ylabel("Drawdown", color="white", fontsize=13)
-    ax2.set_xlabel("Fecha", color="white", fontsize=13)
+    ax1.axhline(series.iloc[0, 0], color=tema["lineas"], linestyle="--", linewidth=1, alpha=0.75)
+    ax2.axhline(0, color=tema["lineas"], linewidth=1, alpha=0.9)
+
+    ax1.set_title(titulo, color=texto, fontsize=22, fontweight="bold", pad=16)
+    ax1.set_ylabel("Valor cartera", color=texto, fontsize=13)
+    ax2.set_ylabel("Drawdown", color=texto, fontsize=13)
+    ax2.set_xlabel("Fecha", color=texto, fontsize=13)
+
     ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1_000_000:.2f} M€"))
     ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.0%}"))
     ax2.set_ylim(dd.min().min() * 1.15, 0.003)
 
     for ax, loc, fs in [(ax1, "upper left", 11), (ax2, "lower left", 10)]:
         leg = ax.legend(loc=loc, frameon=True, fontsize=fs)
-        _estilizar_leyenda(leg)
+        _estilizar_leyenda(leg, tema)
 
     plt.tight_layout()
     plt.show()
