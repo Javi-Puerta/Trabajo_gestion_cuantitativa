@@ -208,7 +208,7 @@ def historico_posiciones_cartera(archivo, fecha_fin=None, capital_inicial=10_000
 
 
 def pnl_por_activo(archivo, fecha_fin=None, capital_inicial=10_000_000, hoja="Operativa",
-                   incluir_costes=True, nombres_cortos=None):
+                   incluir_costes=True, nombres_cortos=None, formato="presentacion"):
     nombres_cortos = nombres_cortos or {
         "SAN.MC": "B. Santander", "BBVA.MC": "BBVA", "BNP.PA": "BNP", "INGA.AS": "ING",
         "ADS.DE": "Adidas", "ASML.AS": "ASML", "IFX.DE": "Infineon", "ENR.DE": "Siemens Energy",
@@ -260,21 +260,28 @@ def pnl_por_activo(archivo, fecha_fin=None, capital_inicial=10_000_000, hoja="Op
     datos = datos[~datos.index.to_series().str.contains("overn|swap|rate", case=False, regex=True)]
     print(f"P&L medio por activo: {float(datos['P&L (€)'].mean()):,.2f} €")
 
-    tema = TEMA_PRESENTACION
-    colores = np.where(datos["P&L (€)"] >= 0, tema["positivo"], "#FF3B30")
+    tema = TEMA_MEMORIA if formato == "memoria" else TEMA_PRESENTACION
+    texto = tema.get("texto", tema["blanco"])
+    total_color = tema.get("destacado", tema.get("naranja", tema["lineas"]))
+    colores = np.where(datos["P&L (€)"] >= 0, tema["positivo"], tema["negativo"])
+
     fig, ax = plt.subplots(figsize=(12.5, max(5, 0.32 * len(datos))), dpi=180)
     fig.patch.set_facecolor(tema["fondo"])
     ax.set_facecolor(tema["fondo"])
+
     ax.barh(datos.index, datos["P&L (€)"], color=colores, alpha=0.92)
-    ax.axvline(0, color="white", linewidth=1, alpha=0.65)
-    ax.axvline(total, color="#FFD166", linewidth=2.2, linestyle="--", label=f"P&L total: {total:,.0f} €")
-    ax.set_title("P&L por activo", color="white", fontsize=20, fontweight="bold", pad=14)
-    ax.set_xlabel("P&L neto (€)", color="white", fontsize=12)
+    ax.axvline(0, color=texto, linewidth=1, alpha=0.55)
+    ax.axvline(total, color=total_color, linewidth=2.2, linestyle="--",
+               label=f"P&L total: {total:,.0f} €")
+
+    ax.set_title("P&L por activo", color=texto, fontsize=20, fontweight="bold", pad=14)
+    ax.set_xlabel("P&L neto (€)", color=texto, fontsize=12)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f} €"))
-    _estilizar_ejes(ax, TEMA_PRESENTACION)
+    _estilizar_ejes(ax, tema)
 
     leg = ax.legend(loc="lower right", frameon=True, fontsize=14)
-    _estilizar_leyenda(leg)
+    _estilizar_leyenda(leg, tema)
+
     plt.tight_layout()
     plt.show()
     return tabla, fig, ax
@@ -561,10 +568,12 @@ def _estilizar_ejes(ax, tema=None):
     tema = {**TEMA_PRESENTACION, **(tema or {})}
     texto = tema.get("texto", tema["blanco"])
     grid = tema.get("grid", tema["blanco"])
-    alpha_grid = 1.0 if tema["fondo"] == "#FFFFFF" else 0.12
+    alpha_grid = 0.75 if tema["fondo"] == "#FFFFFF" else 0.12
 
+    ax.set_axisbelow(True)
     ax.tick_params(colors=texto, labelsize=11)
-    ax.grid(True, color=grid, alpha=alpha_grid, linewidth=0.8)
+    ax.grid(True, color=grid, alpha=alpha_grid, linewidth=0.8, zorder=0)
+
     for s in ax.spines.values():
         s.set_color(tema["lineas"])
 
@@ -624,4 +633,138 @@ def grafico_evolucion_drawdown(series, titulo="Evolución de la cartera y drawdo
     plt.tight_layout()
     plt.show()
     return fig, (ax1, ax2)
+
+
+def tabla_descomposicion_efectos(final):
+    capital_ini = final["NAV cartera"] - final["Resultado cartera (€)"]
+    df = pd.DataFrame({
+        "Impacto (€)": pd.Series({
+            "Efecto mercado": final["Efecto mercado (€)"],
+            "Ef. selección": final["Ef. selección (€)"],
+            "Ef. pesos": final["Ef. pesos (€)"],
+            "Costes": final["Costes (€)"],
+            "Resultado total": final["Resultado cartera (€)"],
+        })
+    })
+    df["Impacto (%)"] = df["Impacto (€)"] / capital_ini
+    return df
+
+
+def grafico_descomposicion_efectos(final, formato="memoria",
+                                   titulo="Descomposición del resultado de la cartera"):
+    tema = TEMA_MEMORIA if formato == "memoria" else TEMA_PRESENTACION
+    texto = tema.get("texto", tema["blanco"])
+    total_color = tema.get("destacado", tema.get("naranja", tema["azul"]))
+
+    df = tabla_descomposicion_efectos(final)
+    efectos = df.iloc[:-1].copy()
+    total = df.loc["Resultado total", "Impacto (€)"]
+
+    vals = efectos["Impacto (€)"].to_numpy()
+    prev = np.r_[0, np.cumsum(vals)[:-1]]
+    post = np.cumsum(vals)
+
+    bottoms = np.minimum(prev, post)
+    heights = np.abs(vals)
+    colores = [tema["positivo"] if v >= 0 else tema["negativo"] for v in vals]
+
+    x = np.arange(len(vals))
+    x_total = len(vals) + 0.9
+
+    fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=180)
+    fig.patch.set_facecolor(tema["fondo"])
+    ax.set_facecolor(tema["fondo"])
+    ax.set_axisbelow(True)
+
+    ax.bar(x, heights, bottom=bottoms, color=colores, width=0.62, zorder=3)
+    ax.bar(x_total, abs(total), bottom=min(0, total), color=total_color, width=0.62, zorder=3)
+
+    for i in range(len(vals) - 1):
+        ax.plot([x[i] + 0.31, x[i + 1] - 0.31], [post[i], post[i]],
+                color=tema["lineas"], linewidth=1.5, zorder=4)
+
+    ax.plot([x[-1] + 0.31, x_total - 0.31], [post[-1], post[-1]],
+            color=tema["lineas"], linewidth=1.5, zorder=4)
+
+    ymax_abs = max(abs(np.r_[0, prev, post, total]))
+    offset = max(ymax_abs * 0.09, 22_000)
+
+    for i, v in enumerate(vals):
+        y = post[i] + (offset if v >= 0 else -offset)
+        ax.text(
+            x[i], y, f"{v/1000:+,.0f} k€",
+            ha="center",
+            va="bottom" if v >= 0 else "top",
+            color=texto,
+            fontsize=15,
+            fontweight="bold"
+        )
+
+    ax.text(
+        x_total, total + (offset if total >= 0 else -offset),
+        f"{total/1000:+,.0f} k€",
+        ha="center",
+        va="bottom" if total >= 0 else "top",
+        color=texto,
+        fontsize=15,
+        fontweight="bold"
+    )
+
+    ax.axhline(0, color=texto, linewidth=1.3, alpha=0.55, zorder=2)
+
+    ax.set_title(titulo, color=texto, fontsize=28, fontweight="bold", pad=18)
+    ax.set_ylabel("Impacto acumulado (€)", color=texto, fontsize=18)
+    ax.set_xticks(list(x) + [x_total])
+    ax.set_xticklabels(
+        ["Ef. mercado", "Ef. selección", "Ef. pesos", "Ef. costes", "Ef. total"],
+        fontsize=16
+    )
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y/1000:,.0f} k€"))
+
+    ymin = min(0, bottoms.min(), post.min(), total) - 2.0 * offset
+    ymax = max(0, (bottoms + heights).max(), post.max(), total) + 2.0 * offset
+    ax.set_ylim(ymin, ymax)
+
+    _estilizar_ejes(ax, tema)
+    ax.tick_params(axis="both", labelsize=16)
+    ax.yaxis.label.set_size(18)
+
+    plt.tight_layout()
+    plt.show()
+    return df, fig, ax
+
+
+def tabla_aciertos_modelo(archivo, universo_tickers, semanal, fecha_fin=None, hoja="Operativa",
+                          incluir_costes=True, benchmark="^STOXX50E", top_n=15):
+    ops, fecha_fin = _leer_operaciones(archivo, fecha_fin, hoja, incluir_costes)
+    precios, dividendos, ops = _datos_mercado(ops, fecha_fin, universo_tickers)
+
+    fecha_valor = precios.index[precios.index <= fecha_fin].max()
+    fechas_op = sorted(f for f in ops["fecha_trade"].unique() if f <= fecha_valor)
+    fechas = fechas_op + [fecha_valor]
+    bmk = _serie_benchmark(benchmark, fechas, min(fechas), max(fechas))
+
+    pos, filas = {}, []
+
+    for i, f0 in enumerate(fechas_op):
+        f1 = fechas_op[i + 1] if i + 1 < len(fechas_op) else fecha_valor
+
+        for r in ops[ops["fecha_trade"].eq(f0)].itertuples():
+            signo = 1 if r.accion == "COMPRA" else -1
+            pos[r.ticker] = pos.get(r.ticker, 0) + signo * abs(float(r.cantidad))
+        pos = {t: q for t, q in pos.items() if abs(q) > 1e-12}
+
+        div = dividendos.loc[(dividendos.index > f0) & (dividendos.index <= f1)].sum()
+        ret = ((precios.loc[f1] + div) / precios.loc[f0] - 1).reindex(universo_tickers).dropna()
+        ret_sel = ret.reindex(pos.keys()).dropna()
+        r_bmk = bmk.loc[f1] / bmk.loc[f0] - 1
+
+        filas.append({
+            "Semana": f"Semana {i + 1}",
+            "Top 15": ret_sel.index.isin(ret.nlargest(top_n).index).sum(),
+            "Baten BMK": (ret_sel > r_bmk).sum(),
+            "Alpha cartera": semanal["Alpha"].iloc[i],
+        })
+
+    return pd.DataFrame(filas)
 
