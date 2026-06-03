@@ -16,13 +16,14 @@ class BacktestEngine:
     def __init__(self, universo: UniversoActivosBase, proveedor: ProveedorDatosBase,
                     feature_engineer: FeatureEngineer, estrategia: EstrategiaBase,
                     start_date: str, end_date: str, len_ventana: int,
-                    nominal: float):
+                    nominal: float, frec_reentreno: int = 180):
         self.universo    = universo
         self.proveedor   = proveedor
         self.estrategia  = estrategia
         self.fe          = feature_engineer
         self.end_date    = pd.Timestamp(end_date)
         self.len_ventana = len_ventana
+        self.frec_reentreno = frec_reentreno
         self.posicion    = {} # diccionario ticker -> cantidad de acciones, actualizado cada fecha
         self.VP          = nominal # Valor presente de la cartera
 
@@ -227,7 +228,7 @@ class BacktestEngine:
             tickers_hoy = self.universo.get_universe_at_date(fecha_hoy)
 
             # 4) Reentrenamiento semestral
-            if ultima_fecha_train is None or (fecha_hoy.date() - ultima_fecha_train).days >= 180:
+            if ultima_fecha_train is None or (fecha_hoy.date() - ultima_fecha_train).days >= self.frec_reentreno:
                 train_flag = self._train(
                     fecha_hoy,
                     tickers_hoy,
@@ -337,7 +338,7 @@ class BacktestEngine:
             df_asof, df_daily_asof = self._datos_asof(fecha_hoy)
             tickers_hoy = self.universo.get_universe_at_date(fecha_hoy)
 
-            if ultima_fecha_train is None or (fecha_hoy.date() - ultima_fecha_train).days >= 180:
+            if ultima_fecha_train is None or (fecha_hoy.date() - ultima_fecha_train).days >= self.frec_reentreno:
                 train_flag = self._train(
                     fecha_hoy,
                     tickers_hoy,
