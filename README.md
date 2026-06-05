@@ -1,608 +1,297 @@
-# Trabajo_gestion_cuantitativa
+# Trabajo de Gestión Cuantitativa
 
-Git para guardar el código del modelo de stock-picking para el proyecto de gestión cuantitativa.
+Repositorio del proyecto de **Gestión Cuantitativa**. La carpeta reúne la documentación final entregable, las presentaciones utilizadas durante el seguimiento del trabajo, el código del modelo de selección de activos, los notebooks de backtesting, los resultados guardados, la operativa enviada y el módulo de seguimiento/riesgo de la cartera.
 
-Buenas prácticas:
-- Hacer commits frecuentes y explicando bien los cambios/aportaciones implementados.
-- Mantener un esquema actualizado.
-- Separar los cambios de backtest, motor operativo y funciones auxiliares.
-- Evitar modificar varias piezas críticas a la vez sin comprobar resultados intermedios.
+El objetivo principal del proyecto es construir y evaluar una estrategia de inversión cuantitativa basada en **stock picking mediante modelos de Machine Learning**, aplicada sobre universos bursátiles como el EURO STOXX 50 y el S&P 500. El flujo completo incluye descarga de datos, construcción de variables, entrenamiento del modelo, selección de activos, optimización de pesos, backtesting histórico, generación de operativas y análisis posterior de resultados y riesgo.
 
-Esquema clases:
-=== ARQUITECTURA DEL SISTEMA ===
+---
 
-FICHEROS
-├── auxiliary_functions.py
-├── UniversoActivos.py
-├── ProveedorDatos.py
-├── VariablesTransformation.py
-├── Modelos.py
-├── Estrategia.py
-├── Backtest.py
-├── MotorInversion.py
-└── auxfun.py
+## Estructura general del repositorio
 
-─────────────────────────────────────────────────────────────
+```text
+Trabajo_gestion_cuantitativa/
+├── Memoria y presentaciones/        # Documentación final y presentaciones del proyecto
+├── Backtest_series/                 # Series y resultados de backtests guardados en .pkl
+├── Envios/                          # Operativas semanales enviadas y archivo histórico
+├── Monitoring/                      # Notebooks y funciones para seguimiento y riesgo
+├── mi_cartera/                      # Estado operativo de la cartera y operaciones realizadas
+├── pruebas/                         # Pruebas y notebooks auxiliares de desarrollo
+├── Aplicacion_modelo.ipynb          # Notebook de aplicación práctica del modelo
+├── backtest_historico.ipynb         # Notebook principal de backtesting histórico
+├── backtest_monos.ipynb             # Backtest aleatorio/de referencia tipo “monos”
+├── *.py                             # Módulos principales del sistema de inversión
+├── *_historico_cambios.csv          # Cambios históricos de composición de índices
+├── latex_memoria.zip                # Proyecto LaTeX de la memoria
+└── README.md                        # Este documento
+```
+---
 
-auxiliary_functions.py
-│
-├── calculate_rsi(series, period=14)
-│   └── Calcula el RSI con ventana rolling de ganancias y pérdidas.
-│
-├── calculate_macd(series)
-│   └── Calcula el MACD como diferencia entre EMA(12) y EMA(26).
-│
-├── calculate_bollinger(prices, period=20, num_std=2.0)
-│   └── Devuelve las bandas superior e inferior de Bollinger.
-│
-├── calculate_beta(returns, market_returns, period)
-│   └── Calcula beta rolling: cov(activo, mercado) / var(mercado).
-│
-├── compute_performance_metrics(level_series, periods_per_year=252, rf_annual=0.0)
-│   └── Calcula rentabilidad total, rentabilidad anualizada, volatilidad, Sharpe,
-│       Sortino, max drawdown, Calmar, win rate, mejor periodo y peor periodo.
-│
-├── build_metrics_table(series_dict, periods_per_year=252, rf_annual=0.0)
-│   └── Recibe {nombre: serie_nivel} y devuelve una tabla comparativa de métricas.
-│
-├── calcular_costes(tickers) → dict
-│   └── Devuelve un coste fijo por ticker. Actualmente 0.05% por operación.
-│
-├── mark_to_market(cartera, datos_hoy) → float
-│   └── Calcula el valor total de la cartera como cash + posiciones a precios actuales.
-│
-├── _rolling_std(x, window)
-│   └── Desviación típica rolling con min_periods = max(1, window//2).
-│
-└── _clip_by_quantiles(df, col, low_q=0.01, high_q=0.99)
-    └── Winsoriza una columna por ticker según cuantiles.
+## Carpetas principales
 
-─────────────────────────────────────────────────────────────
+### `Memoria y presentaciones/`
 
+Contiene los documentos finales y las presentaciones utilizadas durante el desarrollo del trabajo.
+
+```text
+Memoria y presentaciones/
+├── Memoria proyecto.pdf
+├── Presentacion 14 abril.pdf
+├── Presentacion 6 mayo.pdf
+├── Presentacion 14 mayo.pdf
+└── Presentacion 10 junio.pdf
+```
+
+La **memoria** recoge la explicación completa de la metodología, el diseño del modelo, la construcción de la estrategia, los backtests, el análisis de resultados y las conclusiones. Las presentaciones muestran la evolución del proyecto en las distintas fechas de seguimiento.
+
+---
+
+### `Backtest_series/`
+
+Guarda los resultados serializados de los backtests para evitar tener que recalcularlos cada vez.
+
+```text
+Backtest_series/
+├── series_bt_from2020.pkl
+├── series_bt_from2010.pkl
+├── series_bt_crisis2008.pkl
+├── series_bt_covid.pkl
+└── backtest_monos.pkl
+```
+
+Estos archivos contienen las series de valor de cartera y resultados asociados a las distintas ventanas históricas analizadas. Se usan para comparar estrategias, generar tablas de métricas, representar gráficos y alimentar el análisis incluido en la memoria y en la presentación.
+
+---
+
+### `Envios/`
+
+Contiene las operativas semanales del grupo y el histórico consolidado.
+
+```text
+Envios/
+├── Operativa_Grupo5_12032026.xlsx
+├── Operativa_Grupo5_20032026.xlsx
+├── Operativa_Grupo5_27032026.xlsx
+├── Operativa_Grupo5_03042026.xlsx
+├── Operativa_Grupo5_10042026.xlsx
+├── Operativa_Grupo5_17042026.xlsx
+├── Operativa_Grupo5_24042026.xlsx
+├── Operativa_Grupo5_01052026.xlsx
+├── Operativa_Grupo5_08052026.xlsx
+└── historico_operativa.xlsx
+```
+
+Cada archivo `Operativa_Grupo5_*.xlsx` representa una operativa semanal enviada. El archivo `historico_operativa.xlsx` recoge la evolución agregada de las decisiones realizadas a lo largo del proyecto.
+
+---
+
+### `Monitoring/`
+
+Carpeta dedicada al seguimiento de la cartera y al análisis de riesgo.
+
+```text
+Monitoring/
+├── auxfun.py
+├── var_funciones.py
+├── resultados.ipynb
+└── var_tailvar.ipynb
+```
+
+Incluye funciones auxiliares para generar tablas, gráficos y métricas de seguimiento, además de notebooks orientados al análisis de resultados, cálculo de VaR, TailVaR y otras medidas de riesgo.
+
+---
+
+### `mi_cartera/`
+
+Guarda el estado operativo de la cartera utilizada por el motor de inversión.
+
+```text
+mi_cartera/
+├── cartera_actual.json
+├── historial_operaciones.csv
+├── modelo_estado.pkl
+└── ultimo_entrenamiento.txt
+```
+
+Esta carpeta permite conservar la información necesaria para continuar la ejecución de la estrategia entre sesiones: composición actual, historial de compras y ventas, estado del modelo y fecha del último entrenamiento.
+
+---
+
+### `pruebas/`
+
+Contiene notebooks y código utilizado para pruebas de desarrollo.
+
+```text
+pruebas/
+├── StockPickingModel.py
+├── backtest_3m.ipynb
+├── prueba_StockPickingModel.ipynb
+└── prueba_modelo_ML.ipynb
+```
+
+No constituye la parte principal de la entrega, pero documenta experimentos previos, validaciones parciales y pruebas realizadas antes de consolidar la arquitectura final.
+
+---
+
+## Notebooks principales
+
+### `backtest_historico.ipynb`
+
+Notebook principal para ejecutar y analizar los backtests históricos. Permite evaluar la estrategia en distintas ventanas temporales, comparar el comportamiento de los modelos y generar resultados utilizados en la memoria.
+
+### `backtest_monos.ipynb`
+
+Notebook de comparación con carteras aleatorias o estrategias de referencia. Se utiliza para contextualizar el desempeño del modelo frente a asignaciones no informadas.
+
+### `Aplicacion_modelo.ipynb`
+
+Notebook de aplicación práctica del modelo. Está orientado a ejecutar el flujo de selección de activos y generación de cartera en el contexto operativo del proyecto.
+
+---
+
+## Módulos Python principales
+
+El código está organizado de forma modular para separar cada etapa del proceso de inversión.
+
+```text
 UniversoActivos.py
-│
-├── UniversoActivosBase (ABC)
-│   ├── get_full_ticker_list() → list[str]
-│   └── get_universe_at_date(date) → set[str]
-│
-├── UniversoActivosEstatico(tickers)
-│   ├── get_full_ticker_list()
-│   │   └── Devuelve siempre la misma lista de tickers.
-│   └── get_universe_at_date(date)
-│       └── Devuelve siempre el mismo universo.
-│
-└── UniversoActivosDinamico(tickers_actuales, start_date, end_date, csv_cambios_path)
-    ├── _load_changes()
-    │   └── Carga CSV con columnas [date, Tickr added, Tickr removed].
-    ├── get_full_ticker_list()
-    │   └── Devuelve tickers actuales + tickers eliminados históricamente.
-    └── get_universe_at_date(date)
-        └── Reconstruye el universo válido en esa fecha aplicando los cambios en orden inverso.
-
-─────────────────────────────────────────────────────────────
-
 ProveedorDatos.py
-│
-├── ProveedorDatosBase (ABC)
-│   ├── download_prices_daily(tickers, start_date, end_date)
-│   │   └── Interfaz para datos diarios.
-│   └── download_prices_weekly(tickers, start_date, end_date)
-│       └── Interfaz para datos semanales.
-│
-└── YFinanceProvider()
-    ├── download_prices_daily(tickers, start_date, end_date)
-    │   ├── Descarga datos diarios con yfinance.
-    │   ├── Usa auto_adjust=False y actions=True.
-    │   ├── Devuelve columnas:
-    │   │   ['Fecha', 'Ticker', 'Precio_Close', 'Volumen_USD', 'Dividendos']
-    │   ├── Calcula Volumen_USD = Precio_Close * Volumen.
-    │   ├── Rellena precios y volúmenes con ffill por ticker.
-    │   └── Rellena Dividendos con 0.0 cuando no hay pago.
-    │
-    └── download_prices_weekly(tickers, start_date, end_date)
-        ├── Parte de los datos diarios.
-        ├── Remuestrea a W-FRI.
-        ├── Precio_Close: último precio de la semana.
-        ├── Volumen_USD: suma semanal.
-        └── Dividendos: suma semanal.
-
-─────────────────────────────────────────────────────────────
-
 VariablesTransformation.py
-│
-└── FeatureEngineer(criterio, ticker_indice)
-    │
-    ├── feature_cols
-    │   └── Lista de columnas usadas como variables explicativas.
-    │
-    ├── _build_daily_features(df_daily)
-    │   ├── Calcula indicadores diarios por ticker.
-    │   ├── RSI_14.
-    │   ├── MACD.
-    │   ├── Log_Precio_SMA_50.
-    │   ├── Log_Precio_SMA_200.
-    │   ├── Log_Precio_EMA_50.
-    │   ├── Log_Precio_EMA_200.
-    │   └── Remuestrea los indicadores al último valor semanal W-FRI.
-    │
-    └── build(df_weekly, df_daily)
-        ├── Une variables semanales y variables diarias remuestreadas.
-        ├── Incorpora Dividendos si existen; si no, los rellena con 0.0.
-        │
-        ├── Variables semanales:
-        │   ├── Retorno_1W = (Precio_Close + Dividendos) / precio_prev - 1.
-        │   ├── Momentum_12M.
-        │   ├── Momentum_6M.
-        │   ├── Momentum_1M.
-        │   ├── Mom_12m_ex_1m.
-        │   ├── RetRel_SPY_3m.
-        │   ├── Volatilidad_6M.
-        │   ├── Volatilidad_1M.
-        │   ├── Vol_ratio_1m_6m.
-        │   ├── DD_6m.
-        │   ├── VolumenUSD_z_20.
-        │   ├── Turnover_20w.
-        │   ├── Retorno_t1.
-        │   ├── Retorno_t2.
-        │   ├── Ratio_52w_High.
-        │   ├── Beta_12M.
-        │   ├── Log_Precio_Boll_Upper.
-        │   └── Log_Precio_Boll_Lower.
-        │
-        ├── Target:
-        │   ├── criterio='mediana':
-        │   │   └── Target = 1 si el retorno de la semana siguiente supera la mediana.
-        │   └── criterio=N:
-        │       └── Target = 1 si el activo está entre los N mejores retornos de la semana siguiente.
-        │
-        ├── Imputación:
-        │   ├── Forward fill por ticker para evitar mirar al futuro.
-        │   └── fillna(0) como último recurso.
-        │
-        └── Devuelve DataFrame con precios, variables, retorno semanal y target.
-
-─────────────────────────────────────────────────────────────
-
 Modelos.py
-│
-├── ModeloBase (ABC)
-│   ├── train(df, feature_cols)
-│   │   ├── Elimina filas sin Target.
-│   │   ├── Entrena con GridSearchCV.
-│   │   ├── Usa WalkForwardCV como validación temporal.
-│   │   ├── Optimiza scoring='roc_auc'.
-│   │   └── Guarda el mejor estimador en self.clf.
-│   │
-│   └── predict_proba(X)
-│       └── Devuelve la probabilidad de clase positiva.
-│
-├── RandomForestModel(random_state=42, n_splits=5)
-│   └── Modelo Random Forest con grid de:
-│       ├── n_estimators.
-│       ├── max_depth.
-│       ├── min_samples_leaf.
-│       ├── max_features.
-│       └── class_weight.
-│
-├── XGBoostModel(random_state=42, n_splits=5)
-│   └── Modelo XGBoost con grid de:
-│       ├── n_estimators.
-│       ├── max_depth.
-│       ├── learning_rate.
-│       ├── subsample.
-│       ├── colsample_bytree.
-│       └── scale_pos_weight.
-│
-└── WalkForwardCV(n_splits=3, val_ratio=0.20)
-    ├── Cross-validation temporal.
-    ├── Entrena desde el inicio de la muestra.
-    ├── Valida en la ventana temporal inmediatamente posterior.
-    └── Evita mezclar observaciones futuras en el entrenamiento.
-
-─────────────────────────────────────────────────────────────
-
 Estrategia.py
-│
-├── EstrategiaBase (ABC)
-│   ├── train(df, feature_cols, tickers_validos, df_daily) → bool
-│   │   ├── Filtra el entrenamiento a tickers válidos.
-│   │   ├── Devuelve False si no hay datos.
-│   │   └── Entrena self.modelo.
-│   │
-│   └── seleccionar(df_hoy, feature_cols, cartera, df_daily) → dict{ticker: peso}
-│       └── Interfaz común para generar pesos objetivo.
-│
-├── EstrategiaMLEquiponderada(modelo, n_activos_obj, umbral_salida)
-│   └── seleccionar()
-│       ├── Calcula Score = modelo.predict_proba().
-│       ├── Ordena activos por Score descendente.
-│       ├── Mantiene activos ya en cartera si siguen dentro del top umbral_salida.
-│       ├── Completa huecos con nuevos candidatos mejor puntuados.
-│       └── Asigna pesos equiponderados.
-│
-├── EstrategiaMLMonteCarlo(modelo, n_activos_obj, umbral_salida,
-│                          peso_max, n_simulaciones, peso_min, dias_retorno)
-│   └── seleccionar()
-│       ├── Preselecciona candidatos igual que EstrategiaMLEquiponderada.
-│       ├── Construye retornos diarios históricos usando precios + dividendos.
-│       ├── Simula carteras aleatorias con restricciones de peso mínimo y máximo.
-│       ├── Calcula retorno anualizado, volatilidad anualizada y Sharpe.
-│       └── Devuelve la cartera con mayor Sharpe simulado.
-│
-├── EstrategiaMLEquiponderadaMacro(modelo, n_activos_obj, umbral_salida,
-│                                  ticker_indice, exposicion_rv, ticker_hedge)
-│   ├── Hereda de EstrategiaMLEquiponderada.
-│   ├── _señal_riesgo(fecha_hoy, df_daily)
-│   │   └── Activa señal si el precio del índice está por debajo de su media móvil de 200 días.
-│   └── seleccionar()
-│       ├── Selecciona primero cartera de renta variable con la estrategia base.
-│       ├── Si hay señal de riesgo, reduce la exposición a renta variable.
-│       └── Asigna el peso restante al activo hedge.
-│
-└── EstrategiaMLMinVarAlphaTilt(modelo, n_activos_obj, umbral_salida, ...)
-    ├── train()
-    │   ├── Entrena el modelo de alpha.
-    │   └── Estima matriz de covarianzas robusta con Ledoit-Wolf.
-    │
-    └── seleccionar()
-        ├── Calcula alpha a partir del score del modelo.
-        ├── Usa candidatos del top umbral_salida y posiciones actuales.
-        ├── Optimiza pesos mediante SLSQP.
-        ├── Función objetivo:
-        │   └── - alpha·w + lambda_risk·w'Σw + lambda_tc·|w - w_prev|.
-        ├── Impone long-only y peso máximo por activo.
-        ├── Aplica no-trade band.
-        ├── Aplica límite de turnover total.
-        ├── Evalúa si la mejora esperada compensa costes.
-        └── Devuelve los pesos finales de la cartera.
-
-─────────────────────────────────────────────────────────────
-
 Backtest.py
-│
-├── BacktestEngine(universo, proveedor, feature_engineer, estrategia,
-│                  start_date, end_date, len_ventana, nominal)
-│   │
-│   ├── __init__()
-│   │   ├── Ajusta start_date al primer viernes disponible.
-│   │   ├── Obtiene tickers invertibles del universo.
-│   │   ├── Añade ticker_indice al conjunto de descarga.
-│   │   ├── Descarga df_daily y df_weekly desde len_ventana + 1 años antes.
-│   │   └── Calcula costes por ticker.
-│   │
-│   ├── _datos_asof(fecha)
-│   │   ├── Filtra df_daily y df_weekly hasta fecha.
-│   │   ├── Construye features solo con información disponible hasta esa fecha.
-│   │   └── Reduce el riesgo de look-ahead bias.
-│   │
-│   ├── _train(fecha_pivote, tickers_validos, df_asof, df_daily_asof) → bool
-│   │   ├── Define fecha_corte = fecha_pivote - 2 semanas.
-│   │   ├── Usa ventana histórica de len_ventana años.
-│   │   ├── Filtra por tickers válidos.
-│   │   └── Entrena la estrategia.
-│   │
-│   ├── _ajustar_pesos(cartera, precios_hoy) → dict{ticker: peso_real}
-│   │   └── Calcula pesos reales de cartera a precios actuales.
-│   │
-│   ├── _cobrar_dividendos(cartera, datos_hoy) → float
-│   │   ├── Calcula dividendos cobrados por las posiciones existentes.
-│   │   └── Los suma al cash de la cartera.
-│   │
-│   ├── _ajustar_cartera(cartera, datos_hoy, pesos_nuevos)
-│   │   ├── Ejecuta ventas de activos que salen de cartera.
-│   │   ├── Ejecuta compras de activos nuevos.
-│   │   ├── Ajusta posiciones que permanecen en cartera.
-│   │   ├── Aplica costes de transacción.
-│   │   ├── Evita posiciones negativas.
-│   │   └── Devuelve cartera, pesos ajustados y valor total.
-│   │
-│   ├── _run() → DataFrame [Fecha, Valor cartera]
-│   │   ├── Loop diario entre start_date y end_date.
-│   │   ├── Cobra dividendos diariamente.
-│   │   ├── Valora cartera con mark_to_market.
-│   │   ├── Rebalancea en fechas semanales.
-│   │   ├── Reentrena cada 180 días aproximadamente.
-│   │   ├── Genera pesos objetivo con estrategia.seleccionar().
-│   │   └── Guarda la evolución neta de la cartera.
-│   │
-│   └── print_results(bmks=None, bmk_equal_weight=None, plot=True)
-│       ├── Ejecuta _run().
-│       ├── Normaliza la serie de la estrategia.
-│       ├── Compara contra benchmarks si se indican.
-│       ├── Puede construir benchmark equiponderado con dividendos.
-│       ├── Grafica evolución de cartera y benchmarks.
-│       └── Devuelve fechas, serie de estrategia y tabla de métricas.
-│
-└── BacktestRandom(universo, proveedor, start_date, end_date, nominal, n_activos=15)
-    ├── Backtest rápido de estrategias aleatorias.
-    ├── Elige n_activos al azar cada semana.
-    ├── Asigna pesos aleatorios con restricciones de peso mínimo y máximo.
-    ├── Aplica costes según turnover semanal.
-    ├── run_montecarlo(n_sims, benchmark)
-    │   ├── Ejecuta muchas simulaciones aleatorias.
-    │   ├── Devuelve media, std, p10, p50, p90.
-    │   ├── Devuelve también todas las simulaciones.
-    │   └── Puede añadir benchmark.
-    └── Sirve como prueba de robustez frente a estrategias aleatorias.
-
-─────────────────────────────────────────────────────────────
-
 MotorInversion.py
-│
-└── MotorInversion(universo, feature_engineer, estrategia, estado_path,
-                   len_ventana, capital_total, proveedor_cls)
-    │
-    ├── Archivos persistidos:
-    │   ├── cartera_actual.json
-    │   ├── historial_operaciones.csv
-    │   ├── ultimo_entrenamiento.txt
-    │   ├── modelo_estado.pkl
-    │   └── ultima_fecha_dividendos.txt
-    │
-    ├── __init__()
-    │   ├── Carga universo, costes, feature engineer y estrategia.
-    │   ├── Crea carpeta de estado si no existe.
-    │   ├── Carga cartera actual.
-    │   ├── Lee fecha de último entrenamiento.
-    │   ├── Lee fecha de últimos dividendos procesados.
-    │   └── Carga modelo entrenado si existe.
-    │
-    ├── ejecutar(fecha) → DataFrame de señales
-    │   ├── Reentrena si corresponde.
-    │   ├── Genera señales.
-    │   ├── Guarda cartera.
-    │   ├── Guarda historial de operaciones.
-    │   ├── Guarda modelo.
-    │   └── Devuelve tabla de señales.
-    │
-    ├── _reentrenar_si_toca(fecha)
-    │   ├── Reentrena si no hay modelo previo.
-    │   ├── Reentrena si han pasado MESES_RETRAIN * 30 días.
-    │   ├── Descarga datos históricos.
-    │   ├── Construye features.
-    │   ├── Corta el entrenamiento dos semanas antes de la fecha actual.
-    │   └── Guarda fecha de último entrenamiento.
-    │
-    ├── _descargar_datos(fecha, long_hist)
-    │   ├── Descarga desde fecha - (long_hist + 1) años.
-    │   ├── Descarga hasta fecha + 1 día.
-    │   ├── Incluye tickers de cartera/universo.
-    │   └── Incluye ticker del índice.
-    │
-    ├── _leer_fecha_dividendos() / _guardar_fecha_dividendos(fecha)
-    │   └── Controla hasta qué fecha se han incorporado dividendos al cash.
-    │
-    ├── _actualizar_dividendos(fecha, df_daily) → float
-    │   ├── Comprueba que df_daily tenga columna Dividendos.
-    │   ├── Calcula dividendos entre última fecha procesada y fecha actual.
-    │   ├── Multiplica dividendos por acciones en cartera.
-    │   ├── Suma el importe cobrado al cash.
-    │   └── Actualiza ultima_fecha_dividendos.txt.
-    │
-    ├── _generar_señales(fecha) → DataFrame
-    │   ├── Descarga datos actualizados.
-    │   ├── Actualiza dividendos.
-    │   ├── Construye features.
-    │   ├── Filtra tickers válidos en la fecha.
-    │   ├── Valora la cartera antes de operar.
-    │   ├── Llama a estrategia.seleccionar().
-    │   ├── Genera órdenes de VENTA para activos que salen.
-    │   ├── Genera órdenes de COMPRA para activos nuevos.
-    │   ├── Ajusta posiciones de activos que permanecen.
-    │   ├── Aplica costes de transacción.
-    │   └── Devuelve columnas:
-    │       [Ticker, Accion, Cantidad, Precio, CT, Precio_Ejecutado]
-    │
-    ├── _cargar_cartera() / _guardar_cartera()
-    │   └── Lee y escribe cartera_actual.json.
-    │
-    ├── _guardar_historial(fecha, señales)
-    │   └── Añade las señales al CSV historial_operaciones.csv.
-    │
-    ├── _leer_fecha_train()
-    │   └── Lee ultimo_entrenamiento.txt.
-    │
-    └── _cargar_modelo() / _guardar_modelo()
-        └── Serializa o carga el modelo con pickle.
+auxiliary_functions.py
+```
 
-─────────────────────────────────────────────────────────────
+### `UniversoActivos.py`
 
-auxfun.py
-│
-├── Funciones auxiliares para análisis posterior de resultados reales.
-│
-├── get_eurostoxx50_tickers()
-│   └── Obtiene tickers actuales del EURO STOXX 50 desde Wikipedia.
-│
-├── historico_valor_cartera(...)
-│   ├── Reconstruye la evolución diaria de la cartera real desde operaciones.
-│   ├── Tiene en cuenta compras, ventas, costes y dividendos.
-│   └── Devuelve cash, valor de acciones, dividendos diarios, valor cartera y rentabilidad diaria.
-│
-├── pnl_por_activo(...)
-│   ├── Calcula P&L neto por activo.
-│   ├── Incluye operaciones, posición final y dividendos.
-│   └── Genera gráfico de barras horizontales.
-│
-├── tabla_semanal_atribucion(...)
-│   ├── Calcula atribución semanal.
-│   ├── Separa benchmark, selección, pesos y costes.
-│   └── Trabaja con retornos semanales incluyendo dividendos.
-│
-├── encadenar_atribucion(...)
-│   ├── Encadena los efectos semanales.
-│   ├── Convierte efectos porcentuales en euros.
-│   └── Comprueba que la descomposición cuadra con el NAV.
-│
-├── formatear_atribucion(...)
-│   └── Da formato a tablas semanales y finales.
-│
-├── series_diarias_cartera_bmks(...)
-│   ├── Reconstruye serie diaria de cartera real.
-│   ├── Construye benchmark.
-│   ├── Calcula métricas.
-│   └── Devuelve series, tablas y métricas.
-│
-└── grafico_evolucion_drawdown(...)
-    └── Grafica evolución de cartera y drawdown.
+Define la construcción del universo de inversión. Incluye clases para trabajar con universos estáticos y dinámicos, permitiendo reconstruir la composición histórica de índices a partir de archivos CSV de cambios.
 
-─────────────────────────────────────────────────────────────
+### `ProveedorDatos.py`
 
-FLUJO DE DATOS DEL MODELO
+Centraliza la descarga y preparación inicial de datos de mercado, principalmente mediante `yfinance`. Permite obtener precios diarios y semanales, volumen en dólares y dividendos.
 
-1. Definición del universo
-│
-│  tickers actuales + csv de cambios históricos
-│       ↓
-│  UniversoActivos
-│       ↓
-│  tickers válidos en cada fecha
-│
-└─────────────────────────────────────────────────────────────
+### `VariablesTransformation.py`
 
-2. Descarga de datos
-│
-│  tickers válidos + ticker índice
-│       ↓
-│  YFinanceProvider
-│       ↓
-│  df_daily:
-│      Fecha, Ticker, Precio_Close, Volumen_USD, Dividendos
-│
-│  df_weekly:
-│      Fecha, Ticker, Precio_Close, Volumen_USD, Dividendos
-│
-└─────────────────────────────────────────────────────────────
+Construye las variables explicativas utilizadas por el modelo. Incluye indicadores de momentum, volatilidad, drawdown, volumen, beta, RSI, MACD, medias móviles y bandas de Bollinger, además de la construcción del target de clasificación.
 
-3. Construcción de variables
-│
-│  df_daily + df_weekly
-│       ↓
-│  FeatureEngineer
-│       ↓
-│  DataFrame con:
-│      precios, retornos, features, target
-│
-└─────────────────────────────────────────────────────────────
+### `Modelos.py`
 
-4. Entrenamiento
-│
-│  features históricas + target
-│       ↓
-│  ModeloBase / RandomForestModel / XGBoostModel
-│       ↓
-│  modelo entrenado mediante WalkForwardCV
-│
-└─────────────────────────────────────────────────────────────
+Contiene la lógica de entrenamiento de modelos de Machine Learning. Incluye modelos como Random Forest y XGBoost, junto con validación temporal mediante Walk-Forward Cross Validation.
 
-5. Selección de cartera
-│
-│  features de la fecha actual + modelo entrenado + cartera actual
-│       ↓
-│  Estrategia
-│       ↓
-│  pesos objetivo {ticker: peso}
-│
-└─────────────────────────────────────────────────────────────
+### `Estrategia.py`
 
-6A. Backtest
-│
-│  pesos objetivo + precios + dividendos + costes
-│       ↓
-│  BacktestEngine
-│       ↓
-│  evolución histórica de cartera, métricas y gráficos
-│
-└─────────────────────────────────────────────────────────────
+Define las estrategias de selección y asignación de pesos. Incluye estrategias equiponderadas, estrategias con optimización Monte Carlo y estrategias con componente macro o activo de cobertura.
 
-6B. Motor real
-│
-│  pesos objetivo + cartera_actual.json + precios actuales
-│       ↓
-│  MotorInversion
-│       ↓
-│  señales de compra/venta/mantener
-│       ↓
-│  cartera_actual.json + historial_operaciones.csv
-│
-└─────────────────────────────────────────────────────────────
+### `Backtest.py`
 
-USO (Backtest)
+Implementa el motor de backtesting. Simula la evolución histórica de la cartera, aplicando rebalanceos, costes, pesos objetivo y reglas de inversión.
 
-from UniversoActivos import UniversoActivosDinamico
-from ProveedorDatos import YFinanceProvider
-from VariablesTransformation import FeatureEngineer
-from Modelos import RandomForestModel
-from Estrategia import EstrategiaMLEquiponderada
-from Backtest import BacktestEngine
+### `MotorInversion.py`
 
-universo = UniversoActivosDinamico(
-    tickers_actuales=tickers,
-    start_date=start_date,
-    end_date=end_date,
-    csv_cambios_path="eurostoxx50_historico_cambios.csv"
-)
+Permite aplicar el modelo de forma operativa, manteniendo el estado de la cartera, registrando operaciones y actualizando el modelo cuando corresponde.
 
-proveedor = YFinanceProvider()
-fe = FeatureEngineer(criterio=15, ticker_indice="^STOXX50E")
-modelo = RandomForestModel()
-estrategia = EstrategiaMLEquiponderada(
-    modelo=modelo,
-    n_activos_obj=15,
-    umbral_salida=22
-)
+### `auxiliary_functions.py`
 
-engine = BacktestEngine(
-    universo=universo,
-    proveedor=proveedor,
-    feature_engineer=fe,
-    estrategia=estrategia,
-    start_date=start_date,
-    end_date=end_date,
-    len_ventana=4,
-    nominal=10_000_000
-)
+Agrupa funciones auxiliares de cálculo financiero, métricas, indicadores técnicos, costes, mark-to-market, generación de tablas y visualizaciones.
 
-fechas, serie, metricas = engine.print_results(
-    bmks=["^STOXX50E"],
-    bmk_equal_weight=tickers,
-    plot=True
-)
+---
 
-─────────────────────────────────────────────────────────────
+## Archivos de datos auxiliares
 
-USO (Motor en producción, ejecución semanal)
+```text
+eurostoxx50_historico_cambios.csv
+sp500_historico_cambios.csv
+ultima_fecha_dividendos.txt
+```
 
-from datetime import date
-from UniversoActivos import UniversoActivosEstatico
-from ProveedorDatos import YFinanceProvider
-from VariablesTransformation import FeatureEngineer
-from Modelos import RandomForestModel
-from Estrategia import EstrategiaMLMonteCarlo
-from MotorInversion import MotorInversion
+Los archivos CSV recogen cambios históricos en la composición de los índices y permiten evitar sesgos de supervivencia al reconstruir el universo disponible en cada fecha. El archivo `ultima_fecha_dividendos.txt` se utiliza como referencia auxiliar para el tratamiento de dividendos.
 
-universo = UniversoActivosEstatico(tickers)
-fe = FeatureEngineer(criterio=15, ticker_indice="^STOXX50E")
-modelo = RandomForestModel()
+---
 
-estrategia = EstrategiaMLMonteCarlo(
-    modelo=modelo,
-    n_activos_obj=15,
-    umbral_salida=22,
-    peso_max=0.20,
-    n_simulaciones=5000,
-    peso_min=0.02,
-    dias_retorno=252
-)
+## Flujo de trabajo del proyecto
 
-motor = MotorInversion(
-    universo=universo,
-    feature_engineer=fe,
-    estrategia=estrategia,
-    estado_path="./mi_cartera",
-    len_ventana=4,
-    capital_total=10_000_000,
-    proveedor_cls=YFinanceProvider
-)
+El funcionamiento general del repositorio puede resumirse así:
 
-señales = motor.ejecutar(date(2026, 3, 20))
+1. **Definición del universo de inversión** mediante `UniversoActivos.py` y los archivos de cambios históricos.
+2. **Descarga de datos de mercado** con `ProveedorDatos.py`.
+3. **Construcción de variables explicativas y target** con `VariablesTransformation.py`.
+4. **Entrenamiento del modelo** con `Modelos.py`.
+5. **Selección de activos y asignación de pesos** con `Estrategia.py`.
+6. **Simulación histórica** mediante `Backtest.py` y los notebooks de backtesting.
+7. **Guardado de resultados** en `Backtest_series/`.
+8. **Generación de operativa semanal** y actualización de `mi_cartera/`.
+9. **Análisis de seguimiento y riesgo** desde `Monitoring/`.
+10. **Documentación final** en `Memoria y presentaciones/`.
+
+---
+
+## Requisitos orientativos
+
+El proyecto está desarrollado en Python y utiliza principalmente las siguientes librerías:
+
+```text
+pandas
+numpy
+scikit-learn
+xgboost
+yfinance
+scipy
+matplotlib
+requests
+openpyxl
+jupyter
+```
+
+Para ejecutar los notebooks, se recomienda crear un entorno virtual e instalar las dependencias necesarias:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate      # macOS / Linux
+# .venv\Scripts\activate       # Windows
+pip install pandas numpy scikit-learn xgboost yfinance scipy matplotlib requests openpyxl jupyter
+```
+
+---
+
+## Reproducción de resultados
+
+Para reproducir el análisis principal:
+
+1. Abrir el repositorio en el entorno de trabajo.
+2. Instalar las dependencias indicadas.
+3. Ejecutar `backtest_historico.ipynb` para generar o revisar los backtests principales.
+4. Ejecutar `backtest_monos.ipynb` para la comparación con estrategias aleatorias.
+5. Consultar los archivos guardados en `Backtest_series/` para cargar resultados ya calculados.
+6. Revisar `Monitoring/resultados.ipynb` y `Monitoring/var_tailvar.ipynb` para el seguimiento de resultados y riesgo.
+7. Consultar la memoria y presentaciones en `Memoria y presentaciones/`.
+
+---
+
+## Contenido entregable
+
+La entrega del proyecto queda recogida principalmente en:
+
+- `Memoria y presentaciones/Memoria proyecto.pdf`: documento final del trabajo.
+- `Memoria y presentaciones/Presentacion 10 junio.pdf`: presentación final.
+- `backtest_historico.ipynb`: ejecución y análisis de backtests principales.
+- `backtest_monos.ipynb`: comparación con carteras aleatorias.
+- `Backtest_series/`: resultados guardados de las simulaciones.
+- `Envios/`: operativas semanales generadas durante el proyecto.
+- `Monitoring/`: análisis de seguimiento y riesgo.
+- Módulos `.py` de la raíz: implementación del sistema cuantitativo.
+
+---
+
+## Observaciones
+
+- Los archivos `.pkl` permiten reutilizar resultados sin repetir cálculos costosos.
+- Las carpetas `__pycache__/` y `.DS_Store` son archivos generados automáticamente por Python/macOS y no son necesarios para la evaluación del proyecto.
+- La carpeta `.git/`, si se entrega comprimida, contiene el historial interno del repositorio, pero no es necesaria para ejecutar el código.
+- La carpeta `pruebas/` se conserva como apoyo al desarrollo, aunque la parte consolidada se encuentra en los módulos principales y notebooks de la raíz.
+
+---
+
+## Autores
+
+Trabajo realizado por el **Grupo 5** para la asignatura de Gestión Cuantitativa.
