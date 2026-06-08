@@ -449,13 +449,29 @@ def _series_y_metricas(archivo, semanal, final, fecha_fin=None, capital_inicial=
         raise ValueError("La cartera diaria no cuadra con el NAV final de la atribución.")
 
     retornos = series.pct_change().dropna()
-    exceso = retornos - ((1 + rf_anual) ** (1 / 252) - 1)
+    rf_diario = (1 + rf_anual) ** (1 / 252) - 1
+    exceso = retornos - rf_diario
+
+    col_bmk = "STOXX 50"
+    col_cartera = [c for c in series.columns if c != col_bmk][0]
+
     tabla_metricas = pd.DataFrame(index=series.columns)
-    tabla_metricas["Rentabilidad"] = [series[c].iloc[-1] / capital_inicial - 1 for c in series.columns]
+    tabla_metricas["Rentabilidad"] = series.iloc[-1] / capital_inicial - 1
     tabla_metricas["Volatilidad"] = retornos.std() * np.sqrt(252)
     tabla_metricas["Max DD"] = (series / series.cummax() - 1).min()
     tabla_metricas["Sharpe"] = (exceso.mean() / retornos.std()) * np.sqrt(252)
+
+    ret_activo = retornos[col_cartera] - retornos[col_bmk]
+    tracking_error = ret_activo.std(ddof=1) * np.sqrt(252)
+
+    tabla_metricas["Ratio información"] = np.nan
+    tabla_metricas.loc[col_cartera, "Ratio información"] = (
+        ret_activo.mean() * 252 / tracking_error
+        if tracking_error > 0 and not pd.isna(tracking_error)
+        else np.nan
+    )
     tabla_metricas = tabla_metricas.reset_index().rename(columns={"index": "Estrategia"})
+    
     return series, tabla_metricas, estilo_tabla_metricas(tabla_metricas)
 
 
@@ -487,8 +503,13 @@ def estilo_tabla_metricas(tabla_metricas):
                {"selector": "td", "props": [("background-color", "white"), ("color", "black"),
                                             ("font-weight", "bold"), ("text-align", "center"),
                                             ("border", "1px solid #E0E0E0"), ("padding", "10px")]}]
-    return tabla_metricas.style.format({"Rentabilidad": "{:.2%}", "Volatilidad": "{:.2%}",
-                                        "Max DD": "{:.2%}", "Sharpe": "{:.2f}"}).set_table_styles(estilos).hide(axis="index")
+    return tabla_metricas.style.format({
+        "Rentabilidad": "{:.2%}",
+        "Volatilidad": "{:.2%}",
+        "Max DD": "{:.2%}",
+        "Sharpe": "{:.2f}",
+        "Ratio información": "{:.2f}"
+    }, na_rep="").set_table_styles(estilos).hide(axis="index")
 
 
 def tabla_mpl_presentacion(df, titulo=None, figsize=(6.5, 2.8), dpi=220, bbox=(0.04, 0.05, 0.92, 0.76),
@@ -543,23 +564,26 @@ def tabla_semanal_presentacion(semanal, ultimas=10, titulo="Rentabilidades seman
                                   anchos=anchos, columnas_signo=df.columns[1:], fontsize=9.2)
 
 
-def tabla_metricas_presentacion(tabla_metricas, metricas=("Rentabilidad", "Volatilidad", "Sharpe"),
+def tabla_metricas_presentacion(tabla_metricas, metricas=("Rentabilidad", "Volatilidad", "Sharpe", "Max DD", "Ratio información"),
                                 titulo="Métricas finales", transpuesta=True):
     df = tabla_metricas.set_index("Estrategia")[list(metricas)].copy().astype(object)
     pct_cols = {"rentabilidad", "volatilidad", "vola", "max dd", "max drawdown"}
 
     if transpuesta:
-        df = df.T.rename(index={"Volatilidad": "Vola"}).astype(object)
+        df = df.T.rename(index={"Volatilidad": "Vola", "Ratio información": "Info. Ratio"}).astype(object)
         for fila in df.index:
             df.loc[fila] = df.loc[fila].map(lambda x: f"{float(x):.2%}" if fila.lower() in pct_cols else f"{float(x):.2f}")
         df = df.reset_index().rename(columns={"index": "Métrica"})
-        figsize, anchos, bbox = (4.4 + 0.8 * max(0, df.shape[1] - 3), 2.1 + 0.25 * max(0, df.shape[0] - 3)), {0: 0.30, **{i: 0.32 for i in range(1, df.shape[1])}}, (0.03, 0.08, 0.94, 0.72)
+        figsize = (4.4 + 0.8 * max(0, df.shape[1] - 3), 2.1 + 0.25 * max(0, df.shape[0] - 3))
+        anchos = {0: 0.34, **{i: 0.31 for i in range(1, df.shape[1])}}
+        bbox = (0.03, 0.08, 0.94, 0.72)
     else:
         for c in df.columns:
             df[c] = df[c].map(lambda x: f"{float(x):.2%}" if c.lower() in pct_cols else f"{float(x):.2f}")
         df = df.reset_index()
         figsize, anchos, bbox = (6.8, 2.6 + 0.25 * max(0, len(df) - 2)), None, (0.04, 0.06, 0.92, 0.72)
 
+    df = df.replace({"nan": "-", "nan%": "-"})
     return tabla_mpl_presentacion(df, titulo=titulo, figsize=figsize, bbox=bbox,
                                   anchos=anchos, columnas_signo=[], fontsize=9.6)
 
